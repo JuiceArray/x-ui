@@ -1,4 +1,5 @@
 #!/bin/bash
+# env XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=密码 XUI_PORT=端口 bash <(curl -Ls https://raw.githubusercontent.com/JuiceArray/x-ui/main/my-install.sh)
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
