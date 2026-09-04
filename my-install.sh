@@ -54,6 +54,11 @@ echo -e "${green}检测系统: ${release} 架构: ${arch}${plain}"
 install_x-ui() {
     systemctl stop x-ui >/dev/null 2>&1
     systemctl disable x-ui >/dev/null 2>&1
+    rm -rf /usr/local/x-ui
+    rm -f /usr/bin/x-ui
+    rm -f /etc/systemd/system/x-ui.service
+    systemctl daemon-reload
+
     cd /usr/local/
     last_version=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [[ ! -n "$last_version" ]]; then
@@ -75,15 +80,32 @@ install_x-ui() {
     chmod +x /usr/bin/x-ui
     systemctl daemon-reload
 
-    # =========关键：启动一次程序生成 x-ui.db 数据库文件，然后杀掉=========
-    echo -e "${green}生成初始数据库文件...${plain}"
-    ./x-ui >/dev/null 2>&1 &
+    echo -e "${green}启动服务生成初始化数据库(临时54321)${plain}"
+    systemctl enable x-ui
+    systemctl start x-ui
+    sleep 4
+    # 访问web触发落地x-ui.db到磁盘，这一步必不可少
+    curl -s http://127.0.0.1:54321 >/dev/null 2>&1
     sleep 2
-    kill %1 2>/dev/null
+
+    # 停止服务！！服务运行状态下setting修改会被内存覆盖
+    systemctl stop x-ui
     sleep 1
 
+    if [ ! -f "/usr/local/x-ui/x-ui.db" ];then
+        echo -e "${red}数据库文件未生成，终止脚本${plain}"
+        exit 1
+    fi
+
+    # ======现在db已存在，服务停止，原生x‑ui setting命令真正生效======
+    echo -e "${green}执行 x-ui setting 修改配置${plain}"
+    x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
+    x-ui setting -port "${PANEL_PORT}"
+
+    echo -e "${green}修改后配置预览：${plain}"
+    x-ui setting -show
+
     cd - >/dev/null
-    echo -e "${green}x-ui 文件解压、数据库初始化完成${plain}"
 }
 
 install_x-ui
@@ -97,16 +119,7 @@ echo "面板端口: $PANEL_PORT"
 echo "VMess代理端口: $VMESS_PORT"
 echo "====================================="
 
-# 此时 x-ui.db 已经存在，服务完全停止，修改配置会真正写入
-x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
-x-ui setting -port "${PANEL_PORT}"
-
-# 校验修改结果
-echo -e "${green}校验当前配置：${plain}"
-x-ui setting -show
-
-# 正式启动服务
-systemctl enable x-ui
+# 正式启动修改完配置的服务
 systemctl start x-ui
 
 echo "等待面板服务启动..."
