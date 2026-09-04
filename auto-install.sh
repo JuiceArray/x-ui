@@ -1,15 +1,13 @@
 #!/bin/bash
-# env XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=密码 XUI_PORT=端口 XUI_VMESS_PORT=12345 bash <(curl -Ls https://raw.githubusercontent.com/JuiceArray/x-ui/main/my-install.sh)
+# env XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=密码 XUI_PORT=1000 XUI_VMESS_PORT=30001 bash auto-install.sh
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 cur_dir=$(pwd)
 
-# check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
-# check os
 if [[ -f /etc/redhat-release ]]; then
     release="centos"
 elif cat /etc/issue | grep -Eqi "debian"; then
@@ -47,7 +45,6 @@ if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
 fi
 
 os_version=""
-# os version
 if [[ -f /etc/os-release ]]; then
     os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
 fi
@@ -71,9 +68,9 @@ fi
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar uuid-runtime -y
+        yum install wget curl tar sqlite -y
     else
-        apt install wget curl tar uuid-runtime -y
+        apt install wget curl tar sqlite3 -y
     fi
 }
 
@@ -114,30 +111,48 @@ config_after_install() {
     fi
 }
 
-# 新增函数：自动创建vmess并输出 vmess:// 链接
 auto_create_vmess() {
     echo -e "\n${green}>>> 开始自动创建VMess入站${plain}"
-    # 获取服务器公网IP
     SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip || hostname -I | awk '{print $1}')
     VMESS_PORT=${XUI_VMESS_PORT:-20001}
-    VMESS_UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
     ALTERID=0
+    DB_PATH="/etc/x-ui/x-ui.db"
 
-    # x-ui add 创建入站
-    /usr/local/x-ui/x-ui add \
-        --type vmess \
-        --port "${VMESS_PORT}" \
-        --uuid "${VMESS_UUID}" \
-        --alterId ${ALTERID} \
-        --email auto-vmess@local \
-        --limit 0 \
-        --expire 0
+    VMESS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:upper:]' '[:lower:]')
+    echo "生成UUID: ${VMESS_UUID}"
 
-    sleep 1
+    cnt=0
+    while [[ ! -f "${DB_PATH}" && $cnt -lt 20 ]]; do
+        sleep 0.3
+        cnt=$((cnt+1))
+    done
+    if [[ ! -f "${DB_PATH}" ]]; then
+        echo -e "${red}x-ui数据库文件不存在，无法自动创建入站！${plain}"
+        return 1
+    fi
+
+    sqlite3 "${DB_PATH}" <<SQL
+INSERT INTO inbounds (id,user_id,up,down,enable,expiry,total,remark,protocol,settings,stream_settings,port,sniffing)
+VALUES (
+NULL,
+1,
+0,
+0,
+1,
+0,
+0,
+'auto-vmess',
+'vmess',
+'{"clients":[{"id":"${VMESS_UUID}","alterId":${ALTERID},"email":"auto-vmess@local"}]}',
+'{"network":"tcp","security":"none","tcpSettings":{"header":{"type":"none"}}}',
+${VMESS_PORT},
+'{"enabled":false,"destOverride":["http","tls"]}'
+);
+SQL
+
     systemctl restart x-ui
     sleep 2
 
-    # 拼装vmess json，base64编码
     vmess_json=$(cat <<EOF
 {
   "v":"2",
@@ -164,7 +179,8 @@ EOF
     echo -e "IP: ${SERVER_IP}"
     echo -e "端口: ${VMESS_PORT}"
     echo -e "UUID: ${VMESS_UUID}"
-    echo -e "AlterId: ${ALTERID}\n"
+    echo -e "AlterId: ${ALTERID}"
+    echo -e "\n提示：服务器安全组/防火墙放行 ${VMESS_PORT} 端口\n"
 }
 
 install_x-ui() {
@@ -210,7 +226,6 @@ install_x-ui() {
     systemctl enable x-ui
     systemctl start x-ui
 
-    # ========== 安装完成后调用自动创建vmess ==========
     auto_create_vmess
 
     echo -e "${green}x-ui v${last_version}${plain} 安装完成，面板已启动，"
