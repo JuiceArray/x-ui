@@ -1,15 +1,13 @@
 #!/bin/bash
-# env XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=admin37 XUI_PORT=1000 XUI_VMESS_PORT=30001 bash my-install.sh
+# x-ui v0.3.2 专用，无 /xui 路径前缀
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 cur_dir=$(pwd)
 
-# check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
-# check os
 if [[ -f /etc/redhat-release ]]; then
     release="centos"
 elif cat /etc/issue | grep -Eqi "debian"; then
@@ -25,7 +23,7 @@ elif cat /proc/version | grep -Eqi "ubuntu"; then
 elif cat /proc/version | grep -Eqi "centos|red hat|redhat"; then
     release="centos"
 else
-    echo -e "${red}未检测到系统版本，请联系脚本作者！${plain}\n" && exit 1
+    echo -e "${red}未检测到系统版本${plain}\n" && exit 1
 fi
 
 arch=$(arch)
@@ -42,12 +40,11 @@ fi
 echo "架构: ${arch}"
 
 if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
-    echo "本软件不支持 32 位系统(x86)，请使用 64 位系统(x86_64)，如果检测有误，请联系作者"
+    echo "本软件不支持32位系统，请使用64位"
     exit -1
 fi
 
 os_version=""
-# os version
 if [[ -f /etc/os-release ]]; then
     os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
 fi
@@ -57,82 +54,71 @@ fi
 
 if [[ x"${release}" == x"centos" ]]; then
     if [[ ${os_version} -le 6 ]]; then
-        echo -e "${red}请使用 CentOS 7 或更高版本的系统！${plain}\n" && exit 1
+        echo -e "${red}请使用 CentOS7+${plain}\n" && exit 1
     fi
 elif [[ x"${release}" == x"ubuntu" ]]; then
     if [[ ${os_version} -lt 16 ]]; then
-        echo -e "${red}请使用 Ubuntu 16 或更高版本的系统！${plain}\n" && exit 1
+        echo -e "${red}请使用 Ubuntu16+${plain}\n" && exit 1
     fi
 elif [[ x"${release}" == x"debian" ]]; then
     if [[ ${os_version} -lt 8 ]]; then
-        echo -e "${red}请使用 Debian 8 或更高版本的系统！${plain}\n" && exit 1
+        echo -e "${red}请使用 Debian8+${plain}\n" && exit 1
     fi
 fi
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar -y
+        yum install wget curl tar python3 -y
     else
-        apt install wget curl tar -y
+        apt install wget curl tar python3 -y
     fi
 }
 
 config_after_install() {
-    echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改端口与账户密码${plain}"
+    echo -e "${yellow}安装完成修改账户密码端口${plain}"
     if [[ -n "${XUI_AUTO_CONFIRM}" && -n "${XUI_USERNAME}" && -n "${XUI_PASSWORD}" && -n "${XUI_PORT}" ]]; then
-        echo -e "${green}===== 全自动安装模式已激活 =====${plain}"
+        echo -e "${green}=====全自动模式=====${plain}"
         config_confirm="${XUI_AUTO_CONFIRM}"
         config_account="${XUI_USERNAME}"
         config_password="${XUI_PASSWORD}"
         config_port="${XUI_PORT}"
-        echo "确认继续: ${config_confirm}"
-        echo "账户名: ${config_account}"
-        echo "密码: ${config_password}"
-        echo "面板端口: ${config_port}"
     else
-        read -p "确认是否继续?[y/n]": config_confirm
+        read -p "确认继续?[y/n]:" config_confirm
         if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-            read -p "请设置您的账户名:" config_account
-            echo -e "${yellow}您的账户名将设定为:${config_account}${plain}"
-            read -p "请设置您的账户密码:" config_password
-            echo -e "${yellow}您的账户密码将设定为:${config_password}${plain}"
-            read -p "请设置面板访问端口:" config_port
-            echo -e "${yellow}您的面板访问端口将设定为:${config_port}${plain}"
+            read -p "账户名:" config_account
+            read -p "密码:" config_password
+            read -p "面板端口:" config_port
         else
-            echo -e "${red}已取消,所有设置项均为默认设置,请及时修改${plain}"
+            echo -e "${red}取消，使用默认配置，请手动修改${plain}"
             return
         fi
     fi
     if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-        echo -e "${yellow}确认设定,设定中${plain}"
         /usr/local/x-ui/x-ui setting -username ${config_account} -password ${config_password}
-        echo -e "${yellow}账户密码设定完成${plain}"
         /usr/local/x-ui/x-ui setting -port ${config_port}
-        echo -e "${yellow}面板端口设定完成${plain}"
-    else
-        echo -e "${red}已取消,所有设置项均为默认设置,请及时修改${plain}"
     fi
 }
 
 auto_create_vmess() {
-    echo -e "\n${green}>>> 等待x‑ui面板启动，调用原生表单API自动创建VMess入站${plain}"
+    echo -e "\n${green}>>>等待x‑ui面板启动，调用表单API创建VMess${plain}"
     SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip || hostname -I | awk '{print $1}')
     VMESS_PORT=${XUI_VMESS_PORT:-20001}
     PANEL_PORT="${config_port}"
     USER="${config_account}"
     PWD="${config_password}"
-    BASE_URL="http://127.0.0.1:${PANEL_PORT}/xui"
+    BASE_URL="http://127.0.0.1:${PANEL_PORT}"
 
     ready=0
-    for((i=0;i<20;i++));do
-        if curl -s --max-time 1 "${BASE_URL}/login" >/dev/null 2>&1;then
+    for((i=0;i<25;i++));do
+        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 "${BASE_URL}/login")
+        if [[ "${code}" == "200" ]];then
             ready=1
             break
         fi
         sleep 1
     done
     if [[ ${ready} -eq 0 ]];then
-        echo -e "${red}x‑ui面板没有正常启动，跳过自动创建vmess${plain}"
+        echo -e "${red}面板未就绪，跳过创建vmess${plain}"
         return 1
     fi
 
@@ -142,10 +128,10 @@ auto_create_vmess() {
 
     token=$(echo "${login_resp}" | grep -o '"token":"[^"]*"' | head -n1 | cut -d'"' -f4)
     if [[ -z "${token}" ]];then
-        echo -e "${red}API登录失败！返回内容：${login_resp}${plain}"
+        echo -e "${red}登录失败！返回：${login_resp}${plain}"
         return 1
     fi
-    echo -e "${green}面板登录成功，获取到token${plain}"
+    echo -e "${green}登录成功拿到token${plain}"
 
     gen_uuid(){
         echo "$(head -c16 /dev/urandom | xxd -ps -c 16)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c24 /dev/urandom | xxd -ps -c24)"
@@ -153,45 +139,13 @@ auto_create_vmess() {
     VMESS_UUID=$(gen_uuid)
     ALTERID=0
 
-    settings_json=$(cat <<JSON
-{
-  "clients": [
-    {
-      "id": "${VMESS_UUID}",
-      "alterId": ${ALTERID}
-    }
-  ],
-  "disableInsecureEncryption": false
-}
-JSON
-)
-    stream_json=$(cat <<JSON
-{
-  "network": "tcp",
-  "security": "none",
-  "tcpSettings": {
-    "header": {
-      "type": "none"
-    }
-  }
-}
-JSON
-)
-    sniff_json=$(cat <<JSON
-{
-  "enabled": true,
-  "destOverride": [
-    "http",
-    "tls"
-  ]
-}
-JSON
-)
+settings_json='{"clients":[{"id":"'${VMESS_UUID}'","alterId":'${ALTERID}'}],"disableInsecureEncryption":false}'
+stream_json='{"network":"tcp","security":"none","tcpSettings":{"header":{"type":"none"}}}'
+sniff_json='{"enabled":true,"destOverride":["http","tls"]}'
 
-    urlencode() {
-        python3 -c "import urllib.parse;print(urllib.parse.quote('''$1'''))" 2>/dev/null || \
-        echo -n "$1" | perl -pe 's/([^A-Za-z0-9])/sprintf("%%%02X", ord(\$1))/seg'
-    }
+urlencode() {
+    python3 -c "import urllib.parse;print(urllib.parse.quote('''$1'''))"
+}
 
     settings_enc=$(urlencode "${settings_json}")
     stream_enc=$(urlencode "${stream_json}")
@@ -206,42 +160,26 @@ JSON
     if echo "${add_resp}" | grep -q '"success":true'; then
         echo -e "${green}VMess入站创建成功${plain}"
     else
-        echo -e "${red}创建入站失败，返回：${add_resp}${plain}"
+        echo -e "${red}创建失败，返回：${add_resp}${plain}"
         return 1
     fi
 
     list_resp=$(curl -s -X GET "${BASE_URL}/inbound/list" -H "Authorization: ${token}")
     VMESS_UUID=$(echo "${list_resp}" | grep -o '"id":"[^"]*"' | tail -n1 | cut -d'"' -f4)
-    ALTERID=0
 
-    vmess_json=$(cat <<EOF
-{
-  "v":"2",
-  "ps":"auto-vmess",
-  "add":"${SERVER_IP}",
-  "port":"${VMESS_PORT}",
-  "id":"${VMESS_UUID}",
-  "aid":"${ALTERID}",
-  "scy":"auto",
-  "net":"tcp",
-  "type":"none",
-  "host":"",
-  "path":"",
-  "tls":""
-}
-EOF
-)
+vmess_json="{\"v\":\"2\",\"ps\":\"auto-vmess\",\"add\":\"${SERVER_IP}\",\"port\":\"${VMESS_PORT}\",\"id\":\"${VMESS_UUID}\",\"aid\":\"${ALTERID}\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}"
+
     b64=$(echo -n "${vmess_json}" | base64 -w0)
     VMESS_LINK="vmess://${b64}"
 
-    echo -e "${green}==================== VMess 链接 ====================${plain}"
+    echo -e "${green}==================== VMess链接 ====================${plain}"
     echo "${VMESS_LINK}"
     echo -e "${green}=====================================================${plain}"
-    echo -e "IP: ${SERVER_IP}"
-    echo -e "端口: ${VMESS_PORT}"
-    echo -e "UUID: ${VMESS_UUID}"
-    echo -e "AlterId: ${ALTERID}"
-    echo -e "\n提示：服务器安全组/防火墙放行 ${VMESS_PORT} 端口\n"
+    echo "IP: ${SERVER_IP}"
+    echo "端口: ${VMESS_PORT}"
+    echo "UUID: ${VMESS_UUID}"
+    echo "AlterId: ${ALTERID}"
+    echo -e "\n⚠️云服务器安全组放行面板端口、vmess端口\n"
 }
 
 install_x-ui() {
@@ -250,30 +188,28 @@ install_x-ui() {
     if [ $# == 0 ]; then
         last_version=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}检测 x-ui 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 x-ui 版本安装${plain}"
+            echo -e "${red}获取版本失败${plain}"
             exit 1
         fi
-        echo -e "检测到 x-ui 最新版本：${last_version}，开始安装"
+        echo "检测最新版本：${last_version}"
         wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 x-ui 失败，请确保你的服务器能够下载 Github 的文件${plain}"
+            echo -e "${red}下载x-ui失败${plain}"
             exit 1
         fi
     else
         last_version=$1
         url="https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
-        echo -e "开始安装 x-ui v$1"
+        echo "安装版本 v$1"
         wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz ${url}
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 x-ui v$1 失败，请确保此版本存在${plain}"
+            echo -e "${red}下载失败${plain}"
             exit 1
         fi
     fi
-    if [[ -e /usr/local/x-ui/ ]]; then
-        rm /usr/local/x-ui/ -rf
-    fi
+    [[ -e /usr/local/x-ui/ ]] && rm -rf /usr/local/x-ui/
     tar zxvf x-ui-linux-${arch}.tar.gz
-    rm x-ui-linux-${arch}.tar.gz -f
+    rm -f x-ui-linux-${arch}.tar.gz
     cd x-ui
     chmod +x x-ui bin/xray-linux-${arch}
     cp -f x-ui.service /etc/systemd/system/
@@ -289,23 +225,8 @@ install_x-ui() {
 
     auto_create_vmess
 
-    echo -e "${green}x-ui v${last_version}${plain} 安装完成，面板已启动，"
-    echo -e ""
-    echo -e "x-ui 管理脚本使用方法: "
-    echo -e "----------------------------------------------"
-    echo -e "x-ui              - 显示管理菜单 (功能更多)"
-    echo -e "x-ui start        - 启动 x-ui 面板"
-    echo -e "x-ui stop         - 停止 x-ui 面板"
-    echo -e "x-ui restart      - 重启 x-ui 面板"
-    echo -e "x-ui status       - 查看 x-ui 状态"
-    echo -e "x-ui enable       - 设置 x-ui 开机自启"
-    echo -e "x-ui disable      - 取消 x-ui 开机自启"
-    echo -e "x-ui log          - 查看 x-ui 日志"
-    echo -e "x-ui v2-ui        - 迁移本机器的 v2-ui 账号数据至 x-ui"
-    echo -e "x-ui update       - 更新 x-ui 面板"
-    echo -e "x-ui install      - 安装 x-ui 面板"
-    echo -e "x-ui uninstall    - 卸载 x-ui 面板"
-    echo -e "----------------------------------------------"
+    echo -e "${green}x-ui v${last_version} 安装完成${plain}"
+    echo "x-ui 管理命令：x-ui"
 }
 
 echo -e "${green}开始安装${plain}"
