@@ -58,10 +58,10 @@ install_x-ui() {
     cd /usr/local/
     last_version=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [[ ! -n "$last_version" ]]; then
-        echo -e "${red}检测 x-ui 版本失败，可能是超出 Github API 限制，请稍后再试${plain}"
-        exit 1
+        echo -e "${yellow}Github API限流，尝试使用固定版本 v1.7.8${plain}"
+        last_version="v1.7.8"
     fi
-    echo -e "${green}获取 x-ui 最新版本：${last_version}${plain}"
+    echo -e "${green}使用 x-ui 版本：${last_version}${plain}"
     wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz
     if [[ $? -ne 0 ]]; then
         echo -e "${red}下载 x-ui 失败，请确保你的服务器可以访问 Github${plain}"
@@ -93,8 +93,8 @@ echo "====================================="
 /usr/local/x-ui/x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
 /usr/local/x-ui/x-ui setting -port "${PANEL_PORT}"
 
-# 重启服务生效
-x-ui restart
+# 【修复】使用绝对路径重启
+/usr/local/x-ui/x-ui restart
 echo "等待面板服务启动..."
 sleep 8
 
@@ -102,8 +102,8 @@ VMESS_UUID="$(cat /proc/sys/kernel/random/uuid)"
 VMESS_ALTERID=0
 PANEL_ADDR="http://127.0.0.1:${PANEL_PORT}"
 
-# 获取服务器对外IP，优先公网IP
-SERVER_IP=$(curl -s --max-time 5 ifconfig.me)
+# 获取服务器对外IP，多备用源
+SERVER_IP=$(curl -s --max-time 3 ifconfig.me || curl -s --max-time 3 ipinfo.io/ip || curl -s --max-time 3 icanhazip.com)
 if [[ -z "$SERVER_IP" ]];then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
@@ -140,8 +140,10 @@ curl -s -b "$COOKIE_FILE" -X POST "${PANEL_ADDR}/panel/inbound/add" \
   "sniffing":"{\"enabled\":false,\"destOverride\":[\"http\",\"tls\"]}"
 }'
 
+sleep 2
 rm -f "$COOKIE_FILE"
-x-ui restart
+# 【修复】绝对路径重启
+/usr/local/x-ui/x-ui restart
 
 # ========== 生成 vmess:// 链接核心代码 ==========
 VMESS_JSON=$(cat <<EOF
