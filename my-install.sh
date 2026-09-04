@@ -8,7 +8,6 @@ red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
-cur_dir=$(pwd)
 
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
@@ -75,8 +74,16 @@ install_x-ui() {
     cp -f x-ui.sh /usr/bin/x-ui
     chmod +x /usr/bin/x-ui
     systemctl daemon-reload
-    # 重点：这里不start！！先不启动服务，回到外层脚本修改配置
-    echo -e "${green}x-ui 文件解压完成${plain}"
+
+    # =========关键：启动一次程序生成 x-ui.db 数据库文件，然后杀掉=========
+    echo -e "${green}生成初始数据库文件...${plain}"
+    ./x-ui >/dev/null 2>&1 &
+    sleep 2
+    kill %1 2>/dev/null
+    sleep 1
+
+    cd - >/dev/null
+    echo -e "${green}x-ui 文件解压、数据库初始化完成${plain}"
 }
 
 install_x-ui
@@ -90,11 +97,15 @@ echo "面板端口: $PANEL_PORT"
 echo "VMess代理端口: $VMESS_PORT"
 echo "====================================="
 
-# ✅服务处于stop状态，修改数据库，不会被内存覆盖
+# 此时 x-ui.db 已经存在，服务完全停止，修改配置会真正写入
 x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
 x-ui setting -port "${PANEL_PORT}"
 
-# 现在才启动服务
+# 校验修改结果
+echo -e "${green}校验当前配置：${plain}"
+x-ui setting -show
+
+# 正式启动服务
 systemctl enable x-ui
 systemctl start x-ui
 
