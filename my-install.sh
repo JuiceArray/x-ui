@@ -52,9 +52,9 @@ fi
 
 echo -e "${green}检测系统: ${release} 架构: ${arch}${plain}"
 
-# 原版x‑ui安装逻辑开始
 install_x-ui() {
     systemctl stop x-ui >/dev/null 2>&1
+    systemctl disable x-ui >/dev/null 2>&1
     cd /usr/local/
     last_version=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [[ ! -n "$last_version" ]]; then
@@ -72,14 +72,11 @@ install_x-ui() {
     cd x-ui
     chmod +x x-ui bin/xray-linux-${arch}
     cp -f x-ui.service /etc/systemd/system/
-    # ==========方案C关键：复制包装脚本到全局PATH，支持直接 x-ui 命令==========
     cp -f x-ui.sh /usr/bin/x-ui
     chmod +x /usr/bin/x-ui
-
     systemctl daemon-reload
-    systemctl enable x-ui
-    systemctl start x-ui
-    echo -e "${green}x-ui 基础安装完成${plain}"
+    # 重点：这里不start！！先不启动服务，回到外层脚本修改配置
+    echo -e "${green}x-ui 文件解压完成${plain}"
 }
 
 install_x-ui
@@ -93,12 +90,14 @@ echo "面板端口: $PANEL_PORT"
 echo "VMess代理端口: $VMESS_PORT"
 echo "====================================="
 
-# 修改面板账号密码端口
+# ✅服务处于stop状态，修改数据库，不会被内存覆盖
 x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
 x-ui setting -port "${PANEL_PORT}"
 
-# 现在可以直接 x-ui restart，x-ui.sh内部自动cd工作目录
-x-ui restart
+# 现在才启动服务
+systemctl enable x-ui
+systemctl start x-ui
+
 echo "等待面板服务启动..."
 sleep 8
 
@@ -166,7 +165,6 @@ VMESS_JSON=$(cat <<EOF
 }
 EOF
 )
-# base64编码，去掉换行
 VMESS_B64=$(echo "$VMESS_JSON" | base64 -w 0)
 VMESS_LINK="vmess://${VMESS_B64}"
 
