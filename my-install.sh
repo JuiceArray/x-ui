@@ -72,6 +72,10 @@ install_x-ui() {
     cd x-ui
     chmod +x x-ui bin/xray-linux-${arch}
     cp -f x-ui.service /etc/systemd/system/
+    # ==========方案C关键：复制包装脚本到全局PATH，支持直接 x-ui 命令==========
+    cp -f x-ui.sh /usr/bin/x-ui
+    chmod +x /usr/bin/x-ui
+
     systemctl daemon-reload
     systemctl enable x-ui
     systemctl start x-ui
@@ -90,11 +94,11 @@ echo "VMess代理端口: $VMESS_PORT"
 echo "====================================="
 
 # 修改面板账号密码端口
-/usr/local/x-ui/x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
-/usr/local/x-ui/x-ui setting -port "${PANEL_PORT}"
+x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
+x-ui setting -port "${PANEL_PORT}"
 
-# 【修复】使用绝对路径重启
-/usr/local/x-ui/x-ui restart
+# 现在可以直接 x-ui restart，x-ui.sh内部自动cd工作目录
+x-ui restart
 echo "等待面板服务启动..."
 sleep 8
 
@@ -142,8 +146,7 @@ curl -s -b "$COOKIE_FILE" -X POST "${PANEL_ADDR}/panel/inbound/add" \
 
 sleep 2
 rm -f "$COOKIE_FILE"
-# 【修复】绝对路径重启
-/usr/local/x-ui/x-ui restart
+x-ui restart
 
 # ========== 生成 vmess:// 链接核心代码 ==========
 VMESS_JSON=$(cat <<EOF
