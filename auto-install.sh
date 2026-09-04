@@ -1,13 +1,15 @@
 #!/bin/bash
-# env XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=密码 XUI_PORT=1000 XUI_VMESS_PORT=30001 bash auto-install.sh
+# env XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=mm XUI_PORT=1000 XUI_VMESS_PORT=30001 bash <(curl -Ls xxx/my-install.sh)
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 cur_dir=$(pwd)
 
+# check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
+# check os
 if [[ -f /etc/redhat-release ]]; then
     release="centos"
 elif cat /etc/issue | grep -Eqi "debian"; then
@@ -45,6 +47,7 @@ if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
 fi
 
 os_version=""
+# os version
 if [[ -f /etc/os-release ]]; then
     os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
 fi
@@ -68,9 +71,9 @@ fi
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar sqlite -y
+        yum install wget curl tar -y
     else
-        apt install wget curl tar sqlite3 -y
+        apt install wget curl tar -y
     fi
 }
 
@@ -112,46 +115,71 @@ config_after_install() {
 }
 
 auto_create_vmess() {
-    echo -e "\n${green}>>> 开始自动创建VMess入站${plain}"
+    echo -e "\n${green}>>> 等待x‑ui面板启动，调用API自动创建VMess入站${plain}"
     SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip || hostname -I | awk '{print $1}')
     VMESS_PORT=${XUI_VMESS_PORT:-20001}
-    ALTERID=0
-    DB_PATH="/etc/x-ui/x-ui.db"
+    PANEL_PORT="${config_port}"
+    USER="${config_account}"
+    PWD="${config_password}"
 
-    VMESS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:upper:]' '[:lower:]')
-    echo "生成UUID: ${VMESS_UUID}"
-
-    cnt=0
-    while [[ ! -f "${DB_PATH}" && $cnt -lt 20 ]]; do
-        sleep 0.3
-        cnt=$((cnt+1))
+    ready=0
+    for((i=0;i<20;i++));do
+        if curl -s --max-time 1 "http://127.0.0.1:${PANEL_PORT}/login" >/dev/null 2>&1;then
+            ready=1
+            break
+        fi
+        sleep 1
     done
-    if [[ ! -f "${DB_PATH}" ]]; then
-        echo -e "${red}x-ui数据库文件不存在，无法自动创建入站！${plain}"
+    if [[ ${ready} -eq 0 ]];then
+        echo -e "${red}x‑ui面板没有正常启动，跳过自动创建vmess${plain}"
         return 1
     fi
 
-    sqlite3 "${DB_PATH}" <<SQL
-INSERT INTO inbounds (id,user_id,up,down,enable,expiry,total,remark,protocol,settings,stream_settings,port,sniffing)
-VALUES (
-NULL,
-1,
-0,
-0,
-1,
-0,
-0,
-'auto-vmess',
-'vmess',
-'{"clients":[{"id":"${VMESS_UUID}","alterId":${ALTERID},"email":"auto-vmess@local"}]}',
-'{"network":"tcp","security":"none","tcpSettings":{"header":{"type":"none"}}}',
-${VMESS_PORT},
-'{"enabled":false,"destOverride":["http","tls"]}'
-);
-SQL
+    login_resp=$(curl -s -X POST "http://127.0.0.1:${PANEL_PORT}/login" \
+      -H "Content-Type:application/json" \
+      -d "{\"username\":\"${USER}\",\"password\":\"${PWD}\"}")
 
-    systemctl restart x-ui
-    sleep 2
+    token=$(echo "${login_resp}" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+    if [[ -z "${token}" ]];then
+        echo -e "${red}API登录失败，无法创建vmess节点${plain}"
+        return 1
+    fi
+
+    gen_uuid(){
+        echo "$(head -c16 /dev/urandom | xxd -ps -c 16)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c24 /dev/urandom | xxd -ps -c24)"
+    }
+    GEN_UUID=$(gen_uuid)
+
+    add_body=$(cat <<JSON
+{
+  "remark":"auto-vmess",
+  "protocol":"vmess",
+  "port":${VMESS_PORT},
+  "settings":"{\"clients\":[{\"id\":\"${GEN_UUID}\",\"alterId\":0,\"email\":\"auto@local\"}]}",
+  "streamSettings":"{\"network\":\"tcp\",\"security\":\"none\",\"tcpSettings\":{\"header\":{\"type\":\"none\"}}}",
+  "sniffing":"{\"enabled\":false,\"destOverride\":[\"http\",\"tls\"]}",
+  "enable":true
+}
+JSON
+)
+
+    add_resp=$(curl -s -X POST "http://127.0.0.1:${PANEL_PORT}/api/inbound/add" \
+      -H "Authorization: ${token}" \
+      -H "Content-Type:application/json" \
+      -d "${add_body}")
+
+    in_id=$(echo "${add_resp}"|grep -o '"id":[0-9]*'|cut -d: -f2)
+    if [[ -z "${in_id}" ]];then
+        echo -e "${red}API创建入站失败: ${add_resp}${plain}"
+        return 1
+    fi
+
+    get_resp=$(curl -s -X GET "http://127.0.0.1:${PANEL_PORT}/api/inbound/${in_id}" \
+      -H "Authorization: ${token}")
+
+    settings=$(echo "${get_resp}" | grep -o '"settings":"[^"]*"' | sed 's/"settings":"//;s/"$//' | sed 's/\\//g')
+    VMESS_UUID=$(echo "${settings}" | grep -o '"id":"[^"]*"' |cut -d'"' -f4)
+    ALTERID=$(echo "${settings}" | grep -o '"alterId":[0-9]*' |cut -d: -f2)
 
     vmess_json=$(cat <<EOF
 {
