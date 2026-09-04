@@ -76,7 +76,6 @@ install_x-ui() {
     cd x-ui
     chmod +x x-ui bin/xray-linux-${arch}
 
-    # 复制service，然后删掉 ExecStart 后面硬编码的 -port 参数！！！核心修复
     cp -f x-ui.service /etc/systemd/system/x-ui.service
     sed -i 's/ExecStart=\/usr\/local\/x-ui\/x-ui.*/ExecStart=\/usr\/local\/x-ui\/x-ui/' /etc/systemd/system/x-ui.service
 
@@ -84,12 +83,31 @@ install_x-ui() {
     chmod +x /usr/bin/x-ui
     systemctl daemon-reload
 
-    echo -e "${green}启动服务生成初始化数据库(临时54321)${plain}"
+    echo -e "${green}启动服务，等待54321端口就绪${plain}"
     systemctl enable x-ui
     systemctl start x-ui
-    sleep 4
-    curl -s http://127.0.0.1:54321 >/dev/null 2>&1
-    sleep 2
+
+    # 循环等待端口54321监听，最多30秒
+    WAIT_MAX=30
+    COUNT=0
+    while ! ss -tln | grep ':54321' >/dev/null ; do
+        sleep 1
+        COUNT=$((COUNT+1))
+        if [ $COUNT -ge $WAIT_MAX ];then
+            echo -e "${red}等待54321端口超时，x-ui启动失败${plain}"
+            exit 1
+        fi
+    done
+    echo -e "${green}54321端口已就绪，触发初始化数据库${plain}"
+
+    # 访问页面触发db落地，重试3次
+    for i in {1..3};do
+        curl -s http://127.0.0.1:54321 >/dev/null 2>&1
+        sleep 1
+        if [ -f "/usr/local/x-ui/x-ui.db" ];then
+            break
+        fi
+    done
 
     systemctl stop x-ui
     sleep 1
@@ -122,8 +140,17 @@ echo "====================================="
 
 systemctl start x-ui
 
-echo "等待面板服务启动..."
-sleep 8
+# 等待新端口启动
+WAIT_MAX=30
+COUNT=0
+while ! ss -tln | grep ":${PANEL_PORT}" >/dev/null ; do
+    sleep 1
+    COUNT=$((COUNT+1))
+    if [ $COUNT -ge $WAIT_MAX ];then
+        echo -e "${yellow}等待面板端口${PANEL_PORT}超时，继续往下执行${plain}"
+        break
+    fi
+done
 
 VMESS_UUID="$(cat /proc/sys/kernel/random/uuid)"
 VMESS_ALTERID=0
