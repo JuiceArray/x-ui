@@ -1,5 +1,5 @@
 #!/bin/bash
-# ====================== 用户可通过环境变量传入参数 ======================
+# 环境变量传入示例：PANEL_USER=admin PANEL_PASS=admin37 PANEL_PORT=1000 VMESS_PORT=20000 bash xxx.sh
 PANEL_USER="${PANEL_USER:-admin}"
 PANEL_PASS="${PANEL_PASS:-admin123456}"
 PANEL_PORT="${PANEL_PORT:-54321}"
@@ -9,224 +9,151 @@ green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
-# check root
-[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
+[[ $EUID -ne 0 ]] && echo -e "${red}必须root执行${plain}" && exit 1
 
-# check os
+# 系统判断
 if [[ -f /etc/redhat-release ]]; then
-    release="centos"
-elif cat /etc/issue | grep -Eqi "debian"; then
-    release="debian"
-elif cat /etc/issue | grep -Eqi "ubuntu"; then
-    release="ubuntu"
-elif cat /etc/issue | grep -Eqi "centos|red hat|redhat"; then
-    release="centos"
-elif cat /proc/version | grep -Eqi "debian"; then
-    release="debian"
-elif cat /proc/version | grep -Eqi "ubuntu"; then
-    release="ubuntu"
+    OS="centos"
+elif cat /etc/issue | grep -Eqi "debian|ubuntu"; then
+    OS="debian"
+else
+    echo -e "${red}不支持系统${plain}"
+    exit 1
 fi
 
 get_arch(){
     arch=$(uname -m)
-    if [[ $arch == x86_64* ]]; then
-        arch="amd64"
-    elif [[ $arch == aarch64* ]]; then
-        arch="arm64"
-    elif [[ $arch == armv7* ]]; then
-        arch="armv7"
-    elif [[ $arch == armv6* ]]; then
-        arch="armv6"
-    else
-        echo -e "${red}不支持的架构: ${arch}${plain}"
-        exit 1
-    fi
+    case $arch in
+        x86_64) echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        armv7l) echo "armv7" ;;
+        armv6l) echo "armv6" ;;
+        *) echo -e "${red}架构不支持:$arch${plain}"; exit 1 ;;
+    esac
 }
-get_arch
+ARCH=$(get_arch)
 
-if [[ $arch != "amd64" && $arch != "arm64" && $arch != "armv7" && $arch != "armv6" ]]; then
-    echo -e "${red}不支持的架构${plain}"
-    exit 1
+# 清理旧
+systemctl stop x-ui >/dev/null 2>&1
+systemctl disable x-ui >/dev/null 2>&1
+rm -rf /usr/local/x-ui
+rm -f /usr/bin/x-ui
+rm -f /etc/systemd/system/x-ui.service
+systemctl daemon-reload
+
+# 安装sqlite3
+if ! command -v sqlite3 >/dev/null;then
+    echo -e "${green}安装 sqlite3${plain}"
+    if [[ $OS == "debian" ]];then
+        apt update -y >/dev/null 2>&1
+        apt install sqlite3 -y >/dev/null 2>&1
+    else
+        yum install sqlite -y >/dev/null 2>&1
+    fi
 fi
 
-echo -e "${green}检测系统: ${release} 架构: ${arch}${plain}"
+# 下载原版
+cd /usr/local
+LAST_VER=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+[[ -z "$LAST_VER" ]] && LAST_VER="v1.7.8"
+echo -e "${green}下载版本:${LAST_VER} arch:${ARCH}${plain}"
+wget -q --no-check-certificate -O x-ui-linux-${ARCH}.tar.gz "https://github.com/vaxilu/x-ui/releases/download/${LAST_VER}/x-ui-linux-${ARCH}.tar.gz"
+tar zxf x-ui-linux-${ARCH}.tar.gz
+rm -f x-ui-linux-${ARCH}.tar.gz
 
-install_x-ui() {
-    systemctl stop x-ui >/dev/null 2>&1
-    systemctl disable x-ui >/dev/null 2>&1
-    rm -rf /usr/local/x-ui
-    rm -f /usr/bin/x-ui
-    rm -f /etc/systemd/system/x-ui.service
-    systemctl daemon-reload
+cd /usr/local/x-ui
+chmod +x x-ui bin/xray-linux-${ARCH}
 
-    cd /usr/local/
-    last_version=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ ! -n "$last_version" ]]; then
-        echo -e "${yellow}Github API限流，尝试使用固定版本 v1.7.8${plain}"
-        last_version="v1.7.8"
-    fi
-    echo -e "${green}使用 x-ui 版本：${last_version}${plain}"
-    wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}下载 x-ui 失败，请确保你的服务器可以访问 Github${plain}"
-        exit 1
-    fi
-    tar zxvf x-ui-linux-${arch}.tar.gz
-    rm x-ui-linux-${arch}.tar.gz -f
-    cd x-ui
-    chmod +x x-ui bin/xray-linux-${arch}
+# 修改service：删除硬编码 -port
+cp -f x-ui.service /etc/systemd/system/x-ui.service
+sed -i 's/ExecStart=\/usr\/local\/x-ui\/x-ui.*/ExecStart=\/usr\/local\/x-ui\/x-ui/' /etc/systemd/system/x-ui.service
+cp -f x-ui.sh /usr/bin/x-ui
+chmod +x /usr/bin/x-ui
+systemctl daemon-reload
 
-    cp -f x-ui.service /etc/systemd/system/x-ui.service
-    sed -i 's/ExecStart=\/usr\/local\/x-ui\/x-ui.*/ExecStart=\/usr\/local\/x-ui\/x-ui/' /etc/systemd/system/x-ui.service
+# ========== 直接本地生成全新预制x‑ui.db，不运行x‑ui程序 ==========
+DB="/usr/local/x-ui/x-ui.db"
+rm -f "$DB"
+PASS_MD5=$(echo -n "${PANEL_PASS}" | md5sum | awk '{print $1}')
 
-    cp -f x-ui.sh /usr/bin/x-ui
-    chmod +x /usr/bin/x-ui
-    systemctl daemon-reload
+# 建表，插入初始配置、管理员账号
+sqlite3 "$DB" <<SQL
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT UNIQUE,password TEXT);
+INSERT INTO settings(key,value) VALUES('web_port','${PANEL_PORT}');
+INSERT INTO users(username,password) VALUES('${PANEL_USER}','${PASS_MD5}');
+SQL
 
-    echo -e "${green}启动服务，等待54321端口就绪${plain}"
-    systemctl enable x-ui
-    systemctl start x-ui
+chmod 644 "$DB"
+echo -e "${green}预制数据库已生成，端口=${PANEL_PORT} user=${PANEL_USER}${plain}"
 
-    # 循环等待端口54321监听，最多30秒
-    WAIT_MAX=30
-    COUNT=0
-    while ! ss -tln | grep ':54321' >/dev/null ; do
-        sleep 1
-        COUNT=$((COUNT+1))
-        if [ $COUNT -ge $WAIT_MAX ];then
-            echo -e "${red}等待54321端口超时，x-ui启动失败${plain}"
-            exit 1
-        fi
-    done
-    echo -e "${green}54321端口已就绪，触发初始化数据库${plain}"
-
-    # 访问页面触发db落地，重试3次
-    for i in {1..3};do
-        curl -s http://127.0.0.1:54321 >/dev/null 2>&1
-        sleep 1
-        if [ -f "/usr/local/x-ui/x-ui.db" ];then
-            break
-        fi
-    done
-
-    systemctl stop x-ui
-    sleep 1
-
-    if [ ! -f "/usr/local/x-ui/x-ui.db" ];then
-        echo -e "${red}数据库文件未生成，终止脚本${plain}"
-        exit 1
-    fi
-
-    echo -e "${green}执行 x-ui setting 修改配置${plain}"
-    x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
-    x-ui setting -port "${PANEL_PORT}"
-
-    echo -e "${green}修改后配置预览：${plain}"
-    x-ui setting -show
-
-    cd - >/dev/null
-}
-
-install_x-ui
-
-# ====================== 自定义扩展部分开始 ======================
-echo ""
-echo "====================================="
-echo "面板账号: $PANEL_USER"
-echo "面板密码: $PANEL_PASS"
-echo "面板端口: $PANEL_PORT"
-echo "VMess代理端口: $VMESS_PORT"
-echo "====================================="
-
+# 直接启动，不再需要54321那一套
+systemctl enable x-ui
 systemctl start x-ui
 
-# 等待新端口启动
+# 循环等待目标端口
 WAIT_MAX=30
 COUNT=0
 while ! ss -tln | grep ":${PANEL_PORT}" >/dev/null ; do
     sleep 1
     COUNT=$((COUNT+1))
     if [ $COUNT -ge $WAIT_MAX ];then
-        echo -e "${yellow}等待面板端口${PANEL_PORT}超时，继续往下执行${plain}"
+        echo -e "${yellow}等待端口${PANEL_PORT}超时，请检查systemctl status x-ui${plain}"
         break
     fi
 done
 
-VMESS_UUID="$(cat /proc/sys/kernel/random/uuid)"
-VMESS_ALTERID=0
 PANEL_ADDR="http://127.0.0.1:${PANEL_PORT}"
-
+# 获取公网IP
 SERVER_IP=$(curl -s --max-time 3 ifconfig.me || curl -s --max-time 3 ipinfo.io/ip || curl -s --max-time 3 icanhazip.com)
-if [[ -z "$SERVER_IP" ]];then
-    SERVER_IP=$(hostname -I | awk '{print $1}')
+[[ -z "$SERVER_IP" ]] && SERVER_IP=$(hostname -I | awk '{print $1}')
+
+# 防火墙放行
+if [[ $OS == "centos" ]];then
+    firewall-cmd --add-port=${PANEL_PORT}/tcp --permanent >/dev/null 2>&1
+    firewall-cmd --add-port=${VMESS_PORT}/tcp --permanent >/dev/null 2>&1
+    firewall-cmd --reload >/dev/null 2>&1
+else
+    ufw allow ${PANEL_PORT}/tcp >/dev/null 2>&1
+    ufw allow ${VMESS_PORT}/tcp >/dev/null 2>&1
 fi
 
-if command -v firewall-cmd &>/dev/null;then
-    firewall-cmd --add-port=${PANEL_PORT}/tcp --permanent
-    firewall-cmd --add-port=${VMESS_PORT}/tcp --permanent
-    firewall-cmd --reload
-elif command -v ufw &>/dev/null;then
-    ufw allow ${PANEL_PORT}/tcp
-    ufw allow ${VMESS_PORT}/tcp
-fi
+VMESS_UUID=$(cat /proc/sys/kernel/random/uuid)
+VMESS_ALTERID=0
 
-COOKIE_FILE=$(mktemp)
-curl -s -c "$COOKIE_FILE" -X POST "${PANEL_ADDR}/login" \
-  -H "Content-Type: application/json" \
+# api添加vmess入站
+COOKIE=$(mktemp)
+curl -s -c "$COOKIE" -X POST "${PANEL_ADDR}/login" \
+  -H "Content-Type:application/json" \
   -d "{\"username\":\"${PANEL_USER}\",\"password\":\"${PANEL_PASS}\"}" >/dev/null
 
-curl -s -b "$COOKIE_FILE" -X POST "${PANEL_ADDR}/panel/inbound/add" \
--H "Content-Type: application/json" \
+curl -s -b "$COOKIE" -X POST "${PANEL_ADDR}/panel/inbound/add" \
+-H "Content-Type:application/json" \
 -d '{
-  "up":0,
-  "down":0,
-  "total":0,
-  "remark":"auto-vmess",
-  "enable":true,
-  "expiry":0,
-  "listen":"",
-  "port":'${VMESS_PORT}',
-  "protocol":"vmess",
-  "settings":"{\"clients\":[{\"id\":\"'${VMESS_UUID}'\",\"alterId\":'${VMESS_ALTERID}'}],\"disableInsecureEncryption\":false}",
-  "streamSettings":"{\"network\":\"tcp\",\"security\":\"none\",\"tcpSettings\":{}}",
-  "sniffing":"{\"enabled\":false,\"destOverride\":[\"http\",\"tls\"]}"
-}'
+"up":0,"down":0,"total":0,"remark":"auto-vmess","enable":true,"expiry":0,"listen":"","port":'${VMESS_PORT}',
+"protocol":"vmess","settings":"{\"clients\":[{\"id\":\"'${VMESS_UUID}'\",\"alterId\":'${VMESS_ALTERID}'}],\"disableInsecureEncryption\":false}",
+"streamSettings":"{\"network\":\"tcp\",\"security\":\"none\",\"tcpSettings\":{}}","sniffing":"{\"enabled\":false,\"destOverride\":[\"http\",\"tls\"]}"
+}' >/dev/null
 
-sleep 2
-rm -f "$COOKIE_FILE"
-x-ui restart
+rm -f "$COOKIE"
+x-ui restart >/dev/null 2>&1
 
+# 生成vmess链接
 VMESS_JSON=$(cat <<EOF
-{
-  "v":"2",
-  "ps":"auto-vmess",
-  "add":"${SERVER_IP}",
-  "port":"${VMESS_PORT}",
-  "id":"${VMESS_UUID}",
-  "aid":"${VMESS_ALTERID}",
-  "scy":"auto",
-  "net":"tcp",
-  "type":"none",
-  "host":"",
-  "path":"",
-  "tls":"none"
-}
+{"v":"2","ps":"auto-vmess","add":"${SERVER_IP}","port":"${VMESS_PORT}","id":"${VMESS_UUID}","aid":"${VMESS_ALTERID}","scy":"auto","net":"tcp","type":"none","host":"","path":"","tls":"none"}
 EOF
 )
-VMESS_B64=$(echo "$VMESS_JSON" | base64 -w 0)
+VMESS_B64=$(echo -n "$VMESS_JSON" | base64 -w0)
 VMESS_LINK="vmess://${VMESS_B64}"
 
 echo ""
-echo "======================= 部署完成 ======================="
+echo "====================部署完成===================="
 echo "面板地址: http://${SERVER_IP}:${PANEL_PORT}"
-echo "面板账号: ${PANEL_USER}"
-echo "面板密码: ${PANEL_PASS}"
-echo "VMess端口: ${VMESS_PORT}"
-echo "VMess UUID: ${VMESS_UUID}"
+echo "账号: ${PANEL_USER}"
+echo "密码: ${PANEL_PASS}"
+echo "vmess端口: ${VMESS_PORT}"
+echo "UUID: ${VMESS_UUID}"
 echo "alterId: ${VMESS_ALTERID}"
-echo ""
-echo -e "${green}VMess完整链接：${plain}"
-echo "${VMESS_LINK}"
-echo "========================================================"
-echo ""
-echo "⚠️记得云服务器控制台安全组放行 ${PANEL_PORT}、${VMESS_PORT} 端口"
+echo "vmess链接: ${VMESS_LINK}"
+echo "================================================="
+echo "⚠️务必云服务器安全组放行 ${PANEL_PORT},${VMESS_PORT}"
