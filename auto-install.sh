@@ -1,5 +1,5 @@
 #!/bin/bash
-# x-ui v0.3.2 专用，无 /xui 路径前缀
+# x‑ui v0.3.2 适配，使用 /api/* json接口
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
@@ -68,9 +68,9 @@ fi
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar python3 -y
+        yum install wget curl tar jq -y
     else
-        apt install wget curl tar python3 -y
+        apt install wget curl tar jq -y
     fi
 }
 
@@ -100,7 +100,7 @@ config_after_install() {
 }
 
 auto_create_vmess() {
-    echo -e "\n${green}>>>等待x‑ui面板启动，调用表单API创建VMess${plain}"
+    echo -e "\n${green}>>>等待x‑ui面板启动，调用JSON API创建VMess${plain}"
     SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip || hostname -I | awk '{print $1}')
     VMESS_PORT=${XUI_VMESS_PORT:-20001}
     PANEL_PORT="${config_port}"
@@ -109,7 +109,7 @@ auto_create_vmess() {
     BASE_URL="http://127.0.0.1:${PANEL_PORT}"
 
     ready=0
-    for((i=0;i<25;i++));do
+    for((i=0;i<35;i++));do
         code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 "${BASE_URL}/login")
         if [[ "${code}" == "200" ]];then
             ready=1
@@ -118,54 +118,64 @@ auto_create_vmess() {
         sleep 1
     done
     if [[ ${ready} -eq 0 ]];then
-        echo -e "${red}面板未就绪，跳过创建vmess${plain}"
+        echo -e "${red}面板35秒未就绪，跳过创建vmess，请查看x-ui log${plain}"
         return 1
     fi
 
-    login_resp=$(curl -s -X POST "${BASE_URL}/login" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "username=${USER}&password=${PWD}")
+    # ========== v0.3.2 真正登录接口 POST /api/login JSON ==========
+    login_resp=$(curl -s -X POST "${BASE_URL}/api/login" \
+      -H "Content-Type: application/json" \
+      -d "{\"username\":\"${USER}\",\"password\":\"${PWD}\"}")
 
-    token=$(echo "${login_resp}" | grep -o '"token":"[^"]*"' | head -n1 | cut -d'"' -f4)
-    if [[ -z "${token}" ]];then
-        echo -e "${red}登录失败！返回：${login_resp}${plain}"
+    token=$(echo "${login_resp}" | jq -r '.data.token')
+    if [[ -z "${token}" || "${token}" == "null" ]];then
+        echo -e "${red}API登录失败！返回：${login_resp}${plain}"
         return 1
     fi
-    echo -e "${green}登录成功拿到token${plain}"
+    echo -e "${green}面板登录成功，获取token${plain}"
 
     gen_uuid(){
         echo "$(head -c16 /dev/urandom | xxd -ps -c 16)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c24 /dev/urandom | xxd -ps -c24)"
     }
     VMESS_UUID=$(gen_uuid)
-    ALTERID=0
 
-settings_json='{"clients":[{"id":"'${VMESS_UUID}'","alterId":'${ALTERID}'}],"disableInsecureEncryption":false}'
-stream_json='{"network":"tcp","security":"none","tcpSettings":{"header":{"type":"none"}}}'
-sniff_json='{"enabled":true,"destOverride":["http","tls"]}'
-
-urlencode() {
-    python3 -c "import urllib.parse;print(urllib.parse.quote('''$1'''))"
+    # api/inbound/add json body，和前端提交一致
+add_json=$(cat <<JSON
+{
+  "remark":"auto-vmess",
+  "enable":true,
+  "port":${VMESS_PORT},
+  "protocol":"vmess",
+  "settings":{
+    "clients":[{"id":"${VMESS_UUID}","alterId":0}],
+    "disableInsecureEncryption":false
+  },
+  "streamSettings":{
+    "network":"tcp",
+    "security":"none",
+    "tcpSettings":{"header":{"type":"none"}}
+  },
+  "sniffing":{"enabled":true,"destOverride":["http","tls"]}
 }
+JSON
+)
 
-    settings_enc=$(urlencode "${settings_json}")
-    stream_enc=$(urlencode "${stream_json}")
-    sniff_enc=$(urlencode "${sniff_json}")
-    remark="auto-vmess"
-
-    add_resp=$(curl -s -X POST "${BASE_URL}/inbound/add" \
+    add_resp=$(curl -s -X POST "${BASE_URL}/api/inbound/add" \
       -H "Authorization: ${token}" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "up=0&down=0&total=0&remark=${remark}&enable=true&expiryTime=0&listen=&port=${VMESS_PORT}&protocol=vmess&settings=${settings_enc}&streamSettings=${stream_enc}&sniffing=${sniff_enc}")
+      -H "Content-Type: application/json" \
+      -d "${add_json}")
 
-    if echo "${add_resp}" | grep -q '"success":true'; then
+    succ=$(echo "${add_resp}" | jq -r '.success')
+    if [[ "${succ}" == "true" ]];then
         echo -e "${green}VMess入站创建成功${plain}"
     else
-        echo -e "${red}创建失败，返回：${add_resp}${plain}"
+        echo -e "${red}创建入站失败，返回：${add_resp}${plain}"
         return 1
     fi
 
-    list_resp=$(curl -s -X GET "${BASE_URL}/inbound/list" -H "Authorization: ${token}")
-    VMESS_UUID=$(echo "${list_resp}" | grep -o '"id":"[^"]*"' | tail -n1 | cut -d'"' -f4)
+    list_resp=$(curl -s -X GET "${BASE_URL}/api/inbound/list" -H "Authorization: ${token}")
+    VMESS_UUID=$(echo "${list_resp}" | jq -r '.[-1].settings.clients[0].id')
+    ALTERID=0
 
 vmess_json="{\"v\":\"2\",\"ps\":\"auto-vmess\",\"add\":\"${SERVER_IP}\",\"port\":\"${VMESS_PORT}\",\"id\":\"${VMESS_UUID}\",\"aid\":\"${ALTERID}\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}"
 
