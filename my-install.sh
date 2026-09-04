@@ -75,7 +75,11 @@ install_x-ui() {
     rm x-ui-linux-${arch}.tar.gz -f
     cd x-ui
     chmod +x x-ui bin/xray-linux-${arch}
-    cp -f x-ui.service /etc/systemd/system/
+
+    # 复制service，然后删掉 ExecStart 后面硬编码的 -port 参数！！！核心修复
+    cp -f x-ui.service /etc/systemd/system/x-ui.service
+    sed -i 's/ExecStart=\/usr\/local\/x-ui\/x-ui.*/ExecStart=\/usr\/local\/x-ui\/x-ui/' /etc/systemd/system/x-ui.service
+
     cp -f x-ui.sh /usr/bin/x-ui
     chmod +x /usr/bin/x-ui
     systemctl daemon-reload
@@ -84,11 +88,9 @@ install_x-ui() {
     systemctl enable x-ui
     systemctl start x-ui
     sleep 4
-    # 访问web触发落地x-ui.db到磁盘，这一步必不可少
     curl -s http://127.0.0.1:54321 >/dev/null 2>&1
     sleep 2
 
-    # 停止服务！！服务运行状态下setting修改会被内存覆盖
     systemctl stop x-ui
     sleep 1
 
@@ -97,7 +99,6 @@ install_x-ui() {
         exit 1
     fi
 
-    # ======现在db已存在，服务停止，原生x‑ui setting命令真正生效======
     echo -e "${green}执行 x-ui setting 修改配置${plain}"
     x-ui setting -username "${PANEL_USER}" -password "${PANEL_PASS}"
     x-ui setting -port "${PANEL_PORT}"
@@ -119,7 +120,6 @@ echo "面板端口: $PANEL_PORT"
 echo "VMess代理端口: $VMESS_PORT"
 echo "====================================="
 
-# 正式启动修改完配置的服务
 systemctl start x-ui
 
 echo "等待面板服务启动..."
@@ -129,13 +129,11 @@ VMESS_UUID="$(cat /proc/sys/kernel/random/uuid)"
 VMESS_ALTERID=0
 PANEL_ADDR="http://127.0.0.1:${PANEL_PORT}"
 
-# 获取服务器对外IP，多备用源
 SERVER_IP=$(curl -s --max-time 3 ifconfig.me || curl -s --max-time 3 ipinfo.io/ip || curl -s --max-time 3 icanhazip.com)
 if [[ -z "$SERVER_IP" ]];then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
 
-# 防火墙放行
 if command -v firewall-cmd &>/dev/null;then
     firewall-cmd --add-port=${PANEL_PORT}/tcp --permanent
     firewall-cmd --add-port=${VMESS_PORT}/tcp --permanent
@@ -171,7 +169,6 @@ sleep 2
 rm -f "$COOKIE_FILE"
 x-ui restart
 
-# ========== 生成 vmess:// 链接核心代码 ==========
 VMESS_JSON=$(cat <<EOF
 {
   "v":"2",
