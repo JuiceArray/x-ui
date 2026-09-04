@@ -1,5 +1,5 @@
 #!/bin/bash
-# env XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=mm XUI_PORT=1000 XUI_VMESS_PORT=30001 bash <(curl -Ls xxx/my-install.sh)
+# env XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=admin37 XUI_PORT=1000 XUI_VMESS_PORT=30001 bash my-install.sh
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
@@ -115,16 +115,17 @@ config_after_install() {
 }
 
 auto_create_vmess() {
-    echo -e "\n${green}>>> 等待x‑ui面板启动，调用API自动创建VMess入站${plain}"
+    echo -e "\n${green}>>> 等待x‑ui面板启动，调用原生表单API自动创建VMess入站${plain}"
     SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip || hostname -I | awk '{print $1}')
     VMESS_PORT=${XUI_VMESS_PORT:-20001}
     PANEL_PORT="${config_port}"
     USER="${config_account}"
     PWD="${config_password}"
+    BASE_URL="http://127.0.0.1:${PANEL_PORT}/xui"
 
     ready=0
     for((i=0;i<20;i++));do
-        if curl -s --max-time 1 "http://127.0.0.1:${PANEL_PORT}/login" >/dev/null 2>&1;then
+        if curl -s --max-time 1 "${BASE_URL}/login" >/dev/null 2>&1;then
             ready=1
             break
         fi
@@ -135,51 +136,83 @@ auto_create_vmess() {
         return 1
     fi
 
-    login_resp=$(curl -s -X POST "http://127.0.0.1:${PANEL_PORT}/login" \
-      -H "Content-Type:application/json" \
-      -d "{\"username\":\"${USER}\",\"password\":\"${PWD}\"}")
+    login_resp=$(curl -s -X POST "${BASE_URL}/login" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "username=${USER}&password=${PWD}")
 
-    token=$(echo "${login_resp}" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+    token=$(echo "${login_resp}" | grep -o '"token":"[^"]*"' | head -n1 | cut -d'"' -f4)
     if [[ -z "${token}" ]];then
-        echo -e "${red}API登录失败，无法创建vmess节点${plain}"
+        echo -e "${red}API登录失败！返回内容：${login_resp}${plain}"
         return 1
     fi
+    echo -e "${green}面板登录成功，获取到token${plain}"
 
     gen_uuid(){
         echo "$(head -c16 /dev/urandom | xxd -ps -c 16)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c24 /dev/urandom | xxd -ps -c24)"
     }
-    GEN_UUID=$(gen_uuid)
+    VMESS_UUID=$(gen_uuid)
+    ALTERID=0
 
-    add_body=$(cat <<JSON
+    settings_json=$(cat <<JSON
 {
-  "remark":"auto-vmess",
-  "protocol":"vmess",
-  "port":${VMESS_PORT},
-  "settings":"{\"clients\":[{\"id\":\"${GEN_UUID}\",\"alterId\":0,\"email\":\"auto@local\"}]}",
-  "streamSettings":"{\"network\":\"tcp\",\"security\":\"none\",\"tcpSettings\":{\"header\":{\"type\":\"none\"}}}",
-  "sniffing":"{\"enabled\":false,\"destOverride\":[\"http\",\"tls\"]}",
-  "enable":true
+  "clients": [
+    {
+      "id": "${VMESS_UUID}",
+      "alterId": ${ALTERID}
+    }
+  ],
+  "disableInsecureEncryption": false
+}
+JSON
+)
+    stream_json=$(cat <<JSON
+{
+  "network": "tcp",
+  "security": "none",
+  "tcpSettings": {
+    "header": {
+      "type": "none"
+    }
+  }
+}
+JSON
+)
+    sniff_json=$(cat <<JSON
+{
+  "enabled": true,
+  "destOverride": [
+    "http",
+    "tls"
+  ]
 }
 JSON
 )
 
-    add_resp=$(curl -s -X POST "http://127.0.0.1:${PANEL_PORT}/api/inbound/add" \
-      -H "Authorization: ${token}" \
-      -H "Content-Type:application/json" \
-      -d "${add_body}")
+    urlencode() {
+        python3 -c "import urllib.parse;print(urllib.parse.quote('''$1'''))" 2>/dev/null || \
+        echo -n "$1" | perl -pe 's/([^A-Za-z0-9])/sprintf("%%%02X", ord(\$1))/seg'
+    }
 
-    in_id=$(echo "${add_resp}"|grep -o '"id":[0-9]*'|cut -d: -f2)
-    if [[ -z "${in_id}" ]];then
-        echo -e "${red}API创建入站失败: ${add_resp}${plain}"
+    settings_enc=$(urlencode "${settings_json}")
+    stream_enc=$(urlencode "${stream_json}")
+    sniff_enc=$(urlencode "${sniff_json}")
+    remark="auto-vmess"
+
+    add_resp=$(curl -s -X POST "${BASE_URL}/inbound/add" \
+      -H "Authorization: ${token}" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "up=0&down=0&total=0&remark=${remark}&enable=true&expiryTime=0&listen=&port=${VMESS_PORT}&protocol=vmess&settings=${settings_enc}&streamSettings=${stream_enc}&sniffing=${sniff_enc}")
+
+    if echo "${add_resp}" | grep -q '"success":true'; then
+        echo -e "${green}VMess入站创建成功${plain}"
+    else
+        echo -e "${red}创建入站失败，返回：${add_resp}${plain}"
         return 1
     fi
 
-    get_resp=$(curl -s -X GET "http://127.0.0.1:${PANEL_PORT}/api/inbound/${in_id}" \
-      -H "Authorization: ${token}")
-
-    settings=$(echo "${get_resp}" | grep -o '"settings":"[^"]*"' | sed 's/"settings":"//;s/"$//' | sed 's/\\//g')
-    VMESS_UUID=$(echo "${settings}" | grep -o '"id":"[^"]*"' |cut -d'"' -f4)
-    ALTERID=$(echo "${settings}" | grep -o '"alterId":[0-9]*' |cut -d: -f2)
+    list_resp=$(curl -s -X GET "${BASE_URL}/inbound/list" -H "Authorization: ${token}")
+    VMESS_UUID=$(echo "${list_resp}" | grep -o '"id":"[^"]*"' | tail -n1 | cut -d'"' -f4)
+    ALTERID=0
 
     vmess_json=$(cat <<EOF
 {
