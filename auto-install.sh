@@ -1,4 +1,6 @@
 #!/bin/bash
+# bash <(curl -Ls https://raw.githubusercontent.com/JuiceArray/x-ui/main/auto-install.sh)
+# XUI_AUTO_CONFIRM=y XUI_USERNAME=admin XUI_PASSWORD=密码 XUI_PORT=10000 XUI_VMESS_PORT=30001 bash <(curl -Ls https://raw.githubusercontent.com/JuiceArray/x-ui/main/auto-install.sh)
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
