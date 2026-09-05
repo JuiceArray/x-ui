@@ -97,16 +97,17 @@ gen_rand_port(){
 }
 
 config_after_install() {
-    # 逻辑：
-    # 1. 如果设置 XUI_AUTO_CONFIRM=y：使用传入的 XUI_USERNAME/XUI_PASSWORD/XUI_PORT
-    # 2. 如果完全不传：自动确认，随机密码、随机端口，用户名默认admin
+    #逻辑：
+    #1. 传入 XUI_AUTO_CONFIRM=y：使用传入环境变量
+    #2. 不传任何参数：全自动随机，完全跳过交互输入
+    #3. 只有手动执行x-ui原始菜单才会进入交互y/n
     if [[ x"${XUI_AUTO_CONFIRM}" == x"y" || x"${XUI_AUTO_CONFIRM}" == x"Y" ]]; then
         config_confirm="y"
         config_account="${XUI_USERNAME:-admin}"
         config_password="${XUI_PASSWORD:-admin}"
         config_port="${XUI_PORT:-54321}"
     else
-        # 不传参数：全自动随机，不交互
+        #不传参：全自动随机，无交互
         config_confirm="y"
         config_account="${XUI_USERNAME:-admin}"
         config_password=$(gen_rand_password)
@@ -119,7 +120,7 @@ config_after_install() {
     /usr/local/x-ui/x-ui setting -port "${config_port}"
     echo -e "${yellow}面板端口设定完成${plain}"
 
-    # 输出重要账号信息给用户
+    #输出重要账号信息给用户
     echo ""
     echo -e "${cyan}==================== XUI 面板信息 ====================${plain}"
     echo -e "面板用户名：${green}${config_account}${plain}"
@@ -130,7 +131,7 @@ config_after_install() {
 }
 
 create_vmess(){
-# 从全局变量读取配置
+#从全局变量读取配置
 XUI_WEB_PORT="${config_port}"
 XUI_API_USER="${config_account}"
 XUI_API_PASS="${config_password}"
