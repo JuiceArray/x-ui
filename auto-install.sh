@@ -185,7 +185,7 @@ PORT=10086
 REMARK="Auto-VMess"
 
 
-curl -X POST http://127.0.0.1:54321/panel/api/inbounds/add \
+curl -X POST http://127.0.0.1:54321/xui/inbound/add \
 -H "Content-Type: application/json" \
 -d "{
     \"up\":0,
