@@ -1,15 +1,11 @@
 #!/bin/bash
-
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
-
 cur_dir=$(pwd)
-
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
-
 # check os
 if [[ -f /etc/redhat-release ]]; then
     release="centos"
@@ -28,9 +24,7 @@ elif cat /proc/version | grep -Eqi "centos|red hat|redhat"; then
 else
     echo -e "${red}未检测到系统版本，请联系脚本作者！${plain}\n" && exit 1
 fi
-
 arch=$(arch)
-
 if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
     arch="amd64"
 elif [[ $arch == "aarch64" || $arch == "arm64" ]]; then
@@ -41,16 +35,12 @@ else
     arch="amd64"
     echo -e "${red}检测架构失败，使用默认架构: ${arch}${plain}"
 fi
-
 echo "架构: ${arch}"
-
 if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
     echo "本软件不支持 32 位系统(x86)，请使用 64 位系统(x86_64)，如果检测有误，请联系作者"
     exit -1
 fi
-
 os_version=""
-
 # os version
 if [[ -f /etc/os-release ]]; then
     os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
@@ -58,7 +48,6 @@ fi
 if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
     os_version=$(awk -F'[= ."]+' '/DISTRIB_RELEASE/{print $2}' /etc/lsb-release)
 fi
-
 if [[ x"${release}" == x"centos" ]]; then
     if [[ ${os_version} -le 6 ]]; then
         echo -e "${red}请使用 CentOS 7 或更高版本的系统！${plain}\n" && exit 1
@@ -72,7 +61,6 @@ elif [[ x"${release}" == x"debian" ]]; then
         echo -e "${red}请使用 Debian 8 或更高版本的系统！${plain}\n" && exit 1
     fi
 fi
-
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
         yum install wget curl tar -y
@@ -80,7 +68,6 @@ install_base() {
         apt install wget curl tar -y
     fi
 }
-
 #This function will be called when user installed x-ui out of sercurity
 config_after_install() {
     echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改端口与账户密码${plain}"
@@ -102,10 +89,64 @@ config_after_install() {
     fi
 }
 
+create_vmess(){
+echo "正在创建 VMess 节点..."
+BASE="http://127.0.0.1:54321"
+
+# 获取cookie，打印请求返回头
+echo -e "\n===== 登录请求 ====="
+COOKIE_RAW=$(curl -i -s \
+-X POST \
+"$BASE/login" \
+-H "Content-Type: application/json" \
+-d '{
+"username":"admin",
+"password":"admin"
+}')
+echo "$COOKIE_RAW"
+COOKIE=$(echo "$COOKIE_RAW" | grep -i "set-cookie" | awk '{print $2}')
+
+if [[ -z "$COOKIE" ]];then
+    echo -e "${red}获取Cookie失败！面板可能未就绪，或者账号密码不是admin/admin${plain}"
+    return 1
+fi
+
+UUID=$(cat /proc/sys/kernel/random/uuid)
+echo -e "\n===== 添加Inbound请求 ====="
+# 保存http返回码和响应体
+RESPONSE_FILE=$(mktemp)
+HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+-X POST \
+"http://127.0.0.1:54321/xui/inbound/add" \
+-H "Cookie:$COOKIE" \
+-H "Content-Type: application/json" \
+-d "
+{
+\"remark\":\"Auto VMess\",
+\"enable\":true,
+\"port\":10086,
+\"protocol\":\"vmess\",
+\"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"$UUID\\\",\\\"alterId\\\":0}]}\",
+\"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\"}\"
+}
+")
+RESPONSE_BODY=$(cat "$RESPONSE_FILE")
+rm -f "$RESPONSE_FILE"
+
+echo "HTTP状态码: $HTTP_CODE"
+echo "返回结果: $RESPONSE_BODY"
+
+echo ""
+echo "=========================="
+echo "VMess创建完成"
+echo "端口: 10086"
+echo "UUID: ${UUID}"
+echo "=========================="
+}
+
 install_x-ui() {
     systemctl stop x-ui
     cd /usr/local/
-
     if [ $# == 0 ]; then
         last_version=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
@@ -128,11 +169,9 @@ install_x-ui() {
             exit 1
         fi
     fi
-
     if [[ -e /usr/local/x-ui/ ]]; then
         rm /usr/local/x-ui/ -rf
     fi
-
     tar zxvf x-ui-linux-${arch}.tar.gz
     rm x-ui-linux-${arch}.tar.gz -f
     cd x-ui
@@ -142,12 +181,7 @@ install_x-ui() {
     chmod +x /usr/local/x-ui/x-ui.sh
     chmod +x /usr/bin/x-ui
     config_after_install
-    #echo -e "如果是全新安装，默认网页端口为 ${green}54321${plain}，用户名和密码默认都是 ${green}admin${plain}"
-    #echo -e "请自行确保此端口没有被其他程序占用，${yellow}并且确保 54321 端口已放行${plain}"
-    #    echo -e "若想将 54321 修改为其它端口，输入 x-ui 命令进行修改，同样也要确保你修改的端口也是放行的"
-    #echo -e ""
-    #echo -e "如果是更新面板，则按你之前的方式访问面板"
-    #echo -e ""
+
     systemctl daemon-reload
     systemctl enable x-ui
     systemctl start x-ui
@@ -168,56 +202,12 @@ install_x-ui() {
     echo -e "x-ui install      - 安装 x-ui 面板"
     echo -e "x-ui uninstall    - 卸载 x-ui 面板"
     echo -e "----------------------------------------------"
+
+    echo -e "\n${yellow}等待面板服务就绪 5秒...${plain}"
+    sleep 5
+    create_vmess
 }
 
 echo -e "${green}开始安装${plain}"
 install_base
 install_x-ui $1
-
-create_vmess(){
-
-echo "正在创建 VMess 节点..."
-BASE="http://127.0.0.1:54321"
-
-COOKIE=$(curl -i -s \
--X POST \
-"$BASE/login" \
--H "Content-Type: application/json" \
--d '{
-"username":"admin",
-"password":"admin"
-}' \
-| grep -i "set-cookie" \
-| awk '{print $2}')
-
-UUID=$(cat /proc/sys/kernel/random/uuid)
-
-curl -X POST \
-"http://127.0.0.1:54321/xui/inbound/add" \
--H "Cookie:$COOKIE" \
--H "Content-Type: application/json" \
--d "
-{
-\"remark\":\"Auto VMess\",
-\"enable\":true,
-\"port\":10086,
-\"protocol\":\"vmess\",
-\"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"$UUID\\\",\\\"alterId\\\":0}]}\",
-\"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\"}\"
-}
-"
-
-
-echo ""
-echo "=========================="
-echo "VMess创建完成"
-echo "端口: ${PORT}"
-echo "UUID: ${UUID}"
-echo "=========================="
-
-}
-
-
-sleep 5
-
-create_vmess
