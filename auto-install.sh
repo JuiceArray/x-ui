@@ -2,6 +2,7 @@
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
+cyan='\033[0;36m'
 plain='\033[0m'
 cur_dir=$(pwd)
 
@@ -69,9 +70,9 @@ fi
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar -y
+        yum install wget curl tar shuf -y
     else
-        apt install wget curl tar -y
+        apt install wget curl tar shuf -y
     fi
 }
 
@@ -84,27 +85,32 @@ get_public_ip(){
     echo "${pub_ip}"
 }
 
+#生成随机密码 16位字母数字
+gen_rand_password(){
+    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16
+    echo
+}
+
+#生成随机端口 >1024，区间20000‑60000
+gen_rand_port(){
+    shuf -i 20000-60000 -n1
+}
+
 config_after_install() {
-    #环境变量自动模式，完全无交互，不输出安全提示
+    # 逻辑：
+    # 1. 如果设置 XUI_AUTO_CONFIRM=y：使用传入的 XUI_USERNAME/XUI_PASSWORD/XUI_PORT
+    # 2. 如果完全不传：自动确认，随机密码、随机端口，用户名默认admin
     if [[ x"${XUI_AUTO_CONFIRM}" == x"y" || x"${XUI_AUTO_CONFIRM}" == x"Y" ]]; then
         config_confirm="y"
         config_account="${XUI_USERNAME:-admin}"
         config_password="${XUI_PASSWORD:-admin}"
         config_port="${XUI_PORT:-54321}"
     else
-        echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改端口与账户密码${plain}"
-        read -p "确认是否继续?[y/n]:" config_confirm
-        if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-            read -p "请设置您的账户名:" config_account
-            echo -e "${yellow}您的账户名将设定为:${config_account}${plain}"
-            read -p "请设置您的账户密码:" config_password
-            echo -e "${yellow}您的账户密码将设定为:${config_password}${plain}"
-            read -p "请设置面板访问端口:" config_port
-            echo -e "${yellow}您的面板访问端口将设定为:${config_port}${plain}"
-        else
-            echo -e "${red}已取消,所有设置项均为默认设置,请及时修改${plain}"
-            return 0
-        fi
+        # 不传参数：全自动随机，不交互
+        config_confirm="y"
+        config_account="${XUI_USERNAME:-admin}"
+        config_password=$(gen_rand_password)
+        config_port=$(gen_rand_port)
     fi
 
     echo -e "${yellow}确认设定,设定中${plain}"
@@ -112,14 +118,23 @@ config_after_install() {
     echo -e "${yellow}账户密码设定完成${plain}"
     /usr/local/x-ui/x-ui setting -port "${config_port}"
     echo -e "${yellow}面板端口设定完成${plain}"
+
+    # 输出重要账号信息给用户
+    echo ""
+    echo -e "${cyan}==================== XUI 面板信息 ====================${plain}"
+    echo -e "面板用户名：${green}${config_account}${plain}"
+    echo -e "面板密码：${green}${config_password}${plain}"
+    echo -e "面板端口：${green}${config_port}${plain}"
+    echo -e "${cyan}=======================================================${plain}"
+    echo ""
 }
 
 create_vmess(){
-echo "正在创建 VMess 节点..."
-XUI_WEB_PORT="${XUI_PORT:-54321}"
-XUI_API_USER="${XUI_USERNAME:-admin}"
-XUI_API_PASS="${XUI_PASSWORD:-admin}"
-VMESS_PORT="${XUI_VMESS_PORT:-10086}"
+# 从全局变量读取配置
+XUI_WEB_PORT="${config_port}"
+XUI_API_USER="${config_account}"
+XUI_API_PASS="${config_password}"
+VMESS_PORT="${XUI_VMESS_PORT:-$(gen_rand_port)}"
 
 BASE="http://127.0.0.1:${XUI_WEB_PORT}"
 pub_ip=$(get_public_ip)
@@ -173,13 +188,13 @@ b64_str=$(echo -n "${vmess_json}" | base64 -w0)
 vmess_link="vmess://${b64_str}"
 
 echo ""
-echo "=========================="
-echo "VMess创建完成"
+echo -e "${cyan}==================== VMESS节点信息 ====================${plain}"
 echo "备注名称: ${remark_name}"
 echo "端口: ${VMESS_PORT}"
 echo "UUID: ${UUID}"
 echo "VMess链接: ${vmess_link}"
-echo "=========================="
+echo -e "${cyan}=======================================================${plain}"
+echo ""
 }
 
 install_x-ui() {
