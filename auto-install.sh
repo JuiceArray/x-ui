@@ -4,8 +4,10 @@ green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 cur_dir=$(pwd)
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
+
 # check os
 if [[ -f /etc/redhat-release ]]; then
     release="centos"
@@ -24,6 +26,7 @@ elif cat /proc/version | grep -Eqi "centos|red hat|redhat"; then
 else
     echo -e "${red}未检测到系统版本，请联系脚本作者！${plain}\n" && exit 1
 fi
+
 arch=$(arch)
 if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
     arch="amd64"
@@ -36,10 +39,12 @@ else
     echo -e "${red}检测架构失败，使用默认架构: ${arch}${plain}"
 fi
 echo "架构: ${arch}"
+
 if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
     echo "本软件不支持 32 位系统(x86)，请使用 64 位系统(x86_64)，如果检测有误，请联系作者"
     exit -1
 fi
+
 os_version=""
 # os version
 if [[ -f /etc/os-release ]]; then
@@ -48,6 +53,7 @@ fi
 if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
     os_version=$(awk -F'[= ."]+' '/DISTRIB_RELEASE/{print $2}' /etc/lsb-release)
 fi
+
 if [[ x"${release}" == x"centos" ]]; then
     if [[ ${os_version} -le 6 ]]; then
         echo -e "${red}请使用 CentOS 7 或更高版本的系统！${plain}\n" && exit 1
@@ -61,6 +67,7 @@ elif [[ x"${release}" == x"debian" ]]; then
         echo -e "${red}请使用 Debian 8 或更高版本的系统！${plain}\n" && exit 1
     fi
 fi
+
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
         yum install wget curl tar -y
@@ -68,63 +75,90 @@ install_base() {
         apt install wget curl tar -y
     fi
 }
-#This function will be called when user installed x-ui out of sercurity
-config_after_install() {
-    echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改端口与账户密码${plain}"
-    read -p "确认是否继续?[y/n]": config_confirm
-    if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-        read -p "请设置您的账户名:" config_account
-        echo -e "${yellow}您的账户名将设定为:${config_account}${plain}"
-        read -p "请设置您的账户密码:" config_password
-        echo -e "${yellow}您的账户密码将设定为:${config_password}${plain}"
-        read -p "请设置面板访问端口:" config_port
-        echo -e "${yellow}您的面板访问端口将设定为:${config_port}${plain}"
-        echo -e "${yellow}确认设定,设定中${plain}"
-        /usr/local/x-ui/x-ui setting -username ${config_account} -password ${config_password}
-        echo -e "${yellow}账户密码设定完成${plain}"
-        /usr/local/x-ui/x-ui setting -port ${config_port}
-        echo -e "${yellow}面板端口设定完成${plain}"
-    else
-        echo -e "${red}已取消,所有设置项均为默认设置,请及时修改${plain}"
+
+# 自动获取公网IP
+get_public_ip(){
+    pub_ip=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip || curl -s --max-time 5 icanhazip.com)
+    if [[ -z "${pub_ip}" ]]; then
+        pub_ip="UnknownIP"
     fi
+    echo "${pub_ip}"
+}
+
+config_after_install() {
+    # 环境变量自动模式：直接赋值，不输出安全提示、不交互
+    if [[ x"${XUI_AUTO_CONFIRM}" == x"y" || x"${XUI_AUTO_CONFIRM}" == x"Y" ]]; then
+        config_confirm="y"
+        config_account="${XUI_USERNAME:-admin}"
+        config_password="${XUI_PASSWORD:-admin}"
+        config_port="${XUI_PORT:-54321}"
+    else
+        # 普通交互模式才输出提示
+        echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改端口与账户密码${plain}"
+        read -p "确认是否继续?[y/n]:" config_confirm
+        if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
+            read -p "请设置您的账户名:" config_account
+            echo -e "${yellow}您的账户名将设定为:${config_account}${plain}"
+            read -p "请设置您的账户密码:" config_password
+            echo -e "${yellow}您的账户密码将设定为:${config_password}${plain}"
+            read -p "请设置面板访问端口:" config_port
+            echo -e "${yellow}您的面板访问端口将设定为:${config_port}${plain}"
+        else
+            echo -e "${red}已取消,所有设置项均为默认设置,请及时修改${plain}"
+            return 0
+        fi
+    fi
+
+    echo -e "${yellow}确认设定,设定中${plain}"
+    /usr/local/x-ui/x-ui setting -username "${config_account}" -password "${config_password}"
+    echo -e "${yellow}账户密码设定完成${plain}"
+    /usr/local/x-ui/x-ui setting -port "${config_port}"
+    echo -e "${yellow}面板端口设定完成${plain}"
 }
 
 create_vmess(){
 echo "正在创建 VMess 节点..."
-BASE="http://127.0.0.1:54321"
+XUI_WEB_PORT="${XUI_PORT:-54321}"
+XUI_API_USER="${XUI_USERNAME:-admin}"
+XUI_API_PASS="${XUI_PASSWORD:-admin}"
+VMESS_PORT="${XUI_VMESS_PORT:-10086}"
 
-# 获取cookie，打印请求返回头
+BASE="http://127.0.0.1:${XUI_WEB_PORT}"
+pub_ip=$(get_public_ip)
+now_time=$(date +"%Y%m%d_%H%M%S")
+remark_name="${pub_ip}_${now_time}"
+
+# 获取cookie
 echo -e "\n===== 登录请求 ====="
 COOKIE_RAW=$(curl -i -s \
 -X POST \
 "$BASE/login" \
 -H "Content-Type: application/json" \
--d '{
-"username":"admin",
-"password":"admin"
-}')
+-d "{
+\"username\":\"${XUI_API_USER}\",
+\"password\":\"${XUI_API_PASS}\"
+}")
 echo "$COOKIE_RAW"
 COOKIE=$(echo "$COOKIE_RAW" | grep -i "set-cookie" | awk '{print $2}')
 
 if [[ -z "$COOKIE" ]];then
-    echo -e "${red}获取Cookie失败！面板可能未就绪，或者账号密码不是admin/admin${plain}"
+    echo -e "${red}获取Cookie失败！面板可能未就绪，或者账号密码错误${plain}"
     return 1
 fi
 
 UUID=$(cat /proc/sys/kernel/random/uuid)
 echo -e "\n===== 添加Inbound请求 ====="
-# 保存http返回码和响应体
 RESPONSE_FILE=$(mktemp)
 HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
 -X POST \
-"http://127.0.0.1:54321/xui/inbound/add" \
+"${BASE}/xui/inbound/add" \
 -H "Cookie:$COOKIE" \
 -H "Content-Type: application/json" \
 -d "
 {
-\"remark\":\"Auto VMess\",
+\"remark\":\"${remark_name}\",
 \"enable\":true,
-\"port\":10086,
+\"port\":${VMESS_PORT},
 \"protocol\":\"vmess\",
 \"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"$UUID\\\",\\\"alterId\\\":0}]}\",
 \"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\"}\"
@@ -136,11 +170,32 @@ rm -f "$RESPONSE_FILE"
 echo "HTTP状态码: $HTTP_CODE"
 echo "返回结果: $RESPONSE_BODY"
 
+# 组装vmess json并生成vmess://链接
+vmess_json=$(jq -n \
+--arg v "2" \
+--arg ps "${remark_name}" \
+--arg add "${pub_ip}" \
+--arg port "${VMESS_PORT}" \
+--arg id "${UUID}" \
+--arg aid "0" \
+--arg scy "auto" \
+--arg net "tcp" \
+--arg type "none" \
+--arg host "" \
+--arg path "" \
+'{v:$v,ps:$ps,add:$add,port:$port,id:$id,aid:$aid,scy:$scy,net:$net,type:$type,host:$host,path:$path}')
+
+# base64编码
+b64_str=$(echo -n "${vmess_json}" | base64 -w0)
+vmess_link="vmess://${b64_str}"
+
 echo ""
 echo "=========================="
 echo "VMess创建完成"
-echo "端口: 10086"
+echo "备注名称: ${remark_name}"
+echo "端口: ${VMESS_PORT}"
 echo "UUID: ${UUID}"
+echo "VMess链接: ${vmess_link}"
 echo "=========================="
 }
 
