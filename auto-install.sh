@@ -177,36 +177,35 @@ install_x-ui $1
 create_vmess(){
 
 echo "正在创建 VMess 节点..."
+BASE="http://127.0.0.1:54321"
+
+COOKIE=$(curl -i -s \
+-X POST \
+"$BASE/login" \
+-H "Content-Type: application/json" \
+-d '{
+"username":"admin",
+"password":"admin"
+}' \
+| grep -i "set-cookie" \
+| awk '{print $2}')
 
 UUID=$(cat /proc/sys/kernel/random/uuid)
 
-PORT=10086
-
-REMARK="Auto-VMess"
-
-
-curl -X POST http://127.0.0.1:54321/xui/inbound/add \
+curl -X POST \
+"http://127.0.0.1:54321/xui/inbound/add" \
+-H "Cookie:$COOKIE" \
 -H "Content-Type: application/json" \
--d "{
-    \"up\":0,
-    \"down\":0,
-    \"total\":0,
-    \"remark\":\"${REMARK}\",
-    \"enable\":true,
-    \"port\":${PORT},
-    \"protocol\":\"vmess\",
-    \"settings\":\"{
-        \\\"clients\\\":[
-            {
-                \\\"id\\\":\\\"${UUID}\\\",
-                \\\"alterId\\\":0
-            }
-        ]
-    }\",
-    \"streamSettings\":\"{
-        \\\"network\\\":\\\"tcp\\\"
-    }\"
-}"
+-d "
+{
+\"remark\":\"Auto VMess\",
+\"enable\":true,
+\"port\":10086,
+\"protocol\":\"vmess\",
+\"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"$UUID\\\",\\\"alterId\\\":0}]}\",
+\"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\"}\"
+}
+"
 
 
 echo ""
