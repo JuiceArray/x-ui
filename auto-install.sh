@@ -244,25 +244,45 @@ add-vmess)
 
     MAX_WAIT=35
     WAITED=0
-    COOKIE=""
+    COOKIE_VALUE=""
+
+    # 第一步：先探测tcp端口可连接，再尝试登录
     while [ $WAITED -lt $MAX_WAIT ]; do
-      COOKIE=$(curl -s -c - -X POST "http://127.0.0.1:${PANEL_PORT}/login" \
-        -H "Content-Type: application/json" \
-        -d "{\"username\":\"${USER}\",\"password\":\"${PASS}\"}" 2>/dev/null | grep -o "x-ui.*=[^;]*")
-      if [[ -n "${COOKIE}" ]];then
-          break
-      fi
-      sleep 1
-      WAITED=$((WAITED+1))
+        if timeout 1 bash -c "</dev/tcp/127.0.0.1/${PANEL_PORT}" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        WAITED=$((WAITED+1))
     done
 
-    if [[ -z "${COOKIE}" ]];then
-        echo "ERROR: x‑ui panel web not ready after ${MAX_WAIT}s"
+    if [ $WAITED -ge $MAX_WAIT ];then
+        echo "ERROR: cannot connect to x‑ui tcp port ${PANEL_PORT} after ${MAX_WAIT}s"
         exit 1
     fi
 
+    # 第二步：执行登录，捕获全部响应头，提取Set‑Cookie，不再使用curl -c -
+    LOGIN_BODY="{\"username\":\"${USER}\",\"password\":\"${PASS}\"}"
+    while [ $WAITED -lt $MAX_WAIT ]; do
+        RESP=$(curl -s -i -X POST "http://127.0.0.1:${PANEL_PORT}/login" \
+            -H "Content-Type: application/json" \
+            -d "${LOGIN_BODY}")
+        # 提取cookie x-ui=xxx
+        COOKIE_VALUE=$(echo "${RESP}" | grep -i '^Set-Cookie:' | grep -o 'x-ui=[^;]*' | head -n1)
+        if [ -n "${COOKIE_VALUE}" ];then
+            break
+        fi
+        sleep 1
+        WAITED=$((WAITED+1))
+    done
+
+    if [ -z "${COOKIE_VALUE}" ];then
+        echo "ERROR: login failed, cannot get x‑ui cookie after ${MAX_WAIT}s"
+        exit 1
+    fi
+
+    # 创建inbound
     curl -s -X POST "http://127.0.0.1:${PANEL_PORT}/panel/inbound/add" \
-    -H "Cookie: ${COOKIE}" \
+    -H "Cookie: ${COOKIE_VALUE}" \
     -H "Content-Type: application/json" \
     -d "{
       \"up\":0,
@@ -288,6 +308,7 @@ add-vmess)
     echo "${VMESS_LINK}" > /root/vmess-info.txt
 ;;
 EOF
+
 # ====================扩展结束====================
 
 
