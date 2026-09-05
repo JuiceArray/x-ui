@@ -243,22 +243,33 @@ echo -e "${green}开始安装${plain}"
 install_base
 install_x-ui $1
 
-# ========== 自动创建VMess节点 START ==========
-sleep 10
-# 加载面板自动生成配置
-source /etc/x-ui/x-ui.conf
-
+# ==========自动创建VMess节点 START 无jq无额外依赖 ==========
 NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
+MAX_WAIT=35
+WAITED=0
+COOKIE=""
 
-# 获取登录Cookie
-COOKIE=$(curl -s -c - -X POST "http://127.0.0.1:${XUI_PORT}/login" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"${XUI_USER}\",\"password\":\"${XUI_PASS}\"}" 2>/dev/null | grep -o "x-ui.*=[^;]*")
+LOCAL_USER="${XUI_USERNAME}"
+LOCAL_PASS="${XUI_PASSWORD}"
+LOCAL_PORT="${XUI_PORT}"
+VMESS_INBOUND_PORT="${XUI_VMESS_PORT:-30001}"
+
+echo ">>>等待x‑ui面板启动，调用JSON API创建VMess"
+while [ $WAITED -lt $MAX_WAIT ]; do
+  COOKIE=$(curl -s -c - -X POST "http://127.0.0.1:${LOCAL_PORT}/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${LOCAL_USER}\",\"password\":\"${LOCAL_PASS}\"}" 2>/dev/null | grep -o "x-ui.*=[^;]*")
+  if [[ -n "${COOKIE}" ]];then
+    echo ">>> x‑ui面板web服务就绪"
+    break
+  fi
+  sleep 1
+  WAITED=$((WAITED+1))
+done
 
 if [[ -n "${COOKIE}" ]];then
-  echo ">>> 登录面板成功，正在自动创建VMess节点"
-  # API新增inbound
-  ADD_RET=$(curl -s -X POST "http://127.0.0.1:${XUI_PORT}/panel/inbound/add" \
+  echo ">>> 登录面板成功，创建VMess inbound，端口:${VMESS_INBOUND_PORT}"
+  ADD_RET=$(curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/panel/inbound/add" \
   -H "Cookie: ${COOKIE}" \
   -H "Content-Type: application/json" \
   -d "{
@@ -269,16 +280,25 @@ if [[ -n "${COOKIE}" ]];then
     \"enable\":true,
     \"expiry\":0,
     \"listen\":\"\",
-    \"port\":20001,
+    \"port\":${VMESS_INBOUND_PORT},
     \"protocol\":\"vmess\",
     \"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"${NEW_UUID}\\\",\\\"alterId\\\":0}]}\",
     \"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\",\\\"security\\\":\\\"none\\\",\\\"tcpSettings\\\":{\\\"header\\\":{\\\"type\\\":\\\"none\\\"}}}\",
     \"sniffing\":\"{\\\"enabled\\\":false,\\\"destOverride\\\":[\\\"http\\\",\\\"tls\\\"]}\"
   }")
-  echo ">>> VMess节点创建完成，UUID: ${NEW_UUID}"
-  echo ">>> VMess: vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"auto-vmess-default\",\"add\":\"$(hostname -I | awk '{print $1}')\",\"port\":\"20001\",\"id\":\"${NEW_UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}" | base64 -w0)"
+
+  PUBLIC_IP=$(hostname -I | awk '{print $1}')
+  # bash手动拼接vmess json，不用jq
+VMESS_PAYLOAD="{\"v\":\"2\",\"ps\":\"auto-vmess-default\",\"add\":\"${PUBLIC_IP}\",\"port\":\"${VMESS_INBOUND_PORT}\",\"id\":\"${NEW_UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}"
+  VMESS_LINK="vmess://$(echo -n "${VMESS_PAYLOAD}" | base64 -w0)"
+
+  echo "✅ VMess创建成功"
+  echo "✅ UUID: ${NEW_UUID}"
+  echo "✅ ${VMESS_LINK}"
+  echo "${VMESS_LINK}" > /root/vmess-info.txt
 else
-  echo "!!! 面板登录失败，跳过自动创建VMess"
+  echo "!!! 面板${MAX_WAIT}秒未就绪，跳过创建vmess，请查看x‑ui log"
 fi
-# ========== 自动创建VMess节点 END ==========
+# ==========自动创建VMess节点 END ==========
+
 
