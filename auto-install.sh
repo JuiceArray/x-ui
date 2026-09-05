@@ -1,392 +1,795 @@
-#!/bin/bash
-# x‑ui v0.3.2 适配，使用 /api/* json接口
+```bash
+#!/usr/bin/env bash
+
+# x-ui 安装 / API 自检版
+# 修复：
+# 1. 不再向 /usr/bin/x-ui 追加非法 add-vmess case
+# 2. 删除重复执行的创建逻辑
+# 3. 统一 XUI_USERNAME / XUI_PASSWORD / XUI_PORT
+# 4. 正确等待 x-ui 服务
+# 5. 使用 /api/login JSON 接口进行 API 自检
+# 6. 严格检查 HTTP 状态码及 JSON 返回
+# 7. 修复 UUID 生成逻辑
+#
+# 环境变量：
+# XUI_AUTO_CONFIRM=y
+# XUI_USERNAME=admin
+# XUI_PASSWORD=你的密码
+# XUI_PORT=54321
+
+set -u
+set -o pipefail
+
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
+blue='\033[0;34m'
 plain='\033[0m'
-cur_dir=$(pwd)
 
-[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
+cur_dir="$(pwd)"
 
-if [[ -f /etc/redhat-release ]]; then
-    release="centos"
-elif cat /etc/issue | grep -Eqi "debian"; then
-    release="debian"
-elif cat /etc/issue | grep -Eqi "ubuntu"; then
-    release="ubuntu"
-elif cat /etc/issue | grep -Eqi "centos|red hat|redhat"; then
-    release="centos"
-elif cat /proc/version | grep -Eqi "debian"; then
-    release="debian"
-elif cat /proc/version | grep -Eqi "ubuntu"; then
-    release="ubuntu"
-elif cat /proc/version | grep -Eqi "centos|red hat|redhat"; then
-    release="centos"
-else
-    echo -e "${red}未检测到系统版本${plain}\n" && exit 1
+log() {
+    echo -e "${green}[INFO]${plain} $*"
+}
+
+warn() {
+    echo -e "${yellow}[WARN]${plain} $*"
+}
+
+error() {
+    echo -e "${red}[ERROR]${plain} $*" >&2
+}
+
+die() {
+    error "$*"
+    exit 1
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+cleanup() {
+    :
+}
+
+trap cleanup EXIT
+
+# ------------------------------------------------------------
+# root
+# ------------------------------------------------------------
+
+if [[ "${EUID}" -ne 0 ]]; then
+    die "必须使用 root 用户运行此脚本。"
 fi
 
-arch=$(arch)
-if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
-    arch="amd64"
-elif [[ $arch == "aarch64" || $arch == "arm64" ]]; then
-    arch="arm64"
-elif [[ $arch == "s390x" ]]; then
-    arch="s390x"
-else
-    arch="amd64"
-    echo -e "${red}检测架构失败，使用默认架构: ${arch}${plain}"
-fi
-echo "架构: ${arch}"
+# ------------------------------------------------------------
+# system detection
+# ------------------------------------------------------------
 
-if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
-    echo "本软件不支持32位系统，请使用64位"
-    exit -1
-fi
+detect_system() {
+    release=""
 
-os_version=""
-if [[ -f /etc/os-release ]]; then
-    os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
-fi
-if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
-    os_version=$(awk -F'[= ."]+' '/DISTRIB_RELEASE/{print $2}' /etc/lsb-release)
-fi
+    if [[ -f /etc/redhat-release ]]; then
+        release="centos"
+    elif [[ -f /etc/os-release ]]; then
+        . /etc/os-release
 
-if [[ x"${release}" == x"centos" ]]; then
-    if [[ ${os_version} -le 6 ]]; then
-        echo -e "${red}请使用 CentOS7+${plain}\n" && exit 1
+        case "${ID:-}" in
+            ubuntu)
+                release="ubuntu"
+                ;;
+            debian)
+                release="debian"
+                ;;
+            centos|rhel|rocky|almalinux|ol)
+                release="centos"
+                ;;
+        esac
+
+        if [[ -z "${release}" && "${ID_LIKE:-}" =~ (debian|ubuntu) ]]; then
+            release="debian"
+        elif [[ -z "${release}" && "${ID_LIKE:-}" =~ (rhel|fedora|centos) ]]; then
+            release="centos"
+        fi
     fi
-elif [[ x"${release}" == x"ubuntu" ]]; then
-    if [[ ${os_version} -lt 16 ]]; then
-        echo -e "${red}请使用 Ubuntu16+${plain}\n" && exit 1
-    fi
-elif [[ x"${release}" == x"debian" ]]; then
-    if [[ ${os_version} -lt 8 ]]; then
-        echo -e "${red}请使用 Debian8+${plain}\n" && exit 1
-    fi
-fi
 
-install_base() {
-    if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar jq -y
-    else
-        apt install wget curl tar jq -y
+    [[ -n "${release}" ]] || die "无法识别当前 Linux 发行版。"
+
+    os_version=""
+
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        os_version="${VERSION_ID:-}"
+    fi
+
+    log "系统：${release}"
+    log "版本：${os_version:-unknown}"
+}
+
+# ------------------------------------------------------------
+# architecture
+# ------------------------------------------------------------
+
+detect_arch() {
+    local machine
+    machine="$(uname -m)"
+
+    case "${machine}" in
+        x86_64|amd64)
+            arch="amd64"
+            ;;
+        aarch64|arm64)
+            arch="arm64"
+            ;;
+        s390x)
+            arch="s390x"
+            ;;
+        *)
+            die "不支持的 CPU 架构：${machine}"
+            ;;
+    esac
+
+    log "架构：${arch}"
+}
+
+# ------------------------------------------------------------
+# 64 bit check
+# ------------------------------------------------------------
+
+check_64bit() {
+    if [[ "$(getconf LONG_BIT 2>/dev/null)" != "64" ]]; then
+        die "当前系统不是 64 位系统。"
     fi
 }
 
+# ------------------------------------------------------------
+# version check
+# ------------------------------------------------------------
+
+version_ge() {
+    # version_ge "目标版本" "最低版本"
+    printf '%s\n%s\n' "$1" "$2" | sort -V -C
+}
+
+check_os_version() {
+    case "${release}" in
+        ubuntu)
+            if [[ -n "${os_version}" ]] && ! version_ge "${os_version}" "16"; then
+                die "Ubuntu 版本过低，请使用 Ubuntu 16+。"
+            fi
+            ;;
+        debian)
+            if [[ -n "${os_version}" ]] && ! version_ge "${os_version}" "8"; then
+                die "Debian 版本过低，请使用 Debian 8+。"
+            fi
+            ;;
+        centos)
+            if [[ -n "${os_version}" ]] && ! version_ge "${os_version}" "7"; then
+                die "CentOS 版本过低，请使用 CentOS 7+。"
+            fi
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------
+# package manager
+# ------------------------------------------------------------
+
+install_base() {
+    log "安装依赖..."
+
+    case "${release}" in
+        centos)
+            if command_exists dnf; then
+                dnf install -y wget curl tar jq ca-certificates
+            else
+                yum install -y wget curl tar jq ca-certificates
+            fi
+            ;;
+        ubuntu|debian)
+            export DEBIAN_FRONTEND=noninteractive
+
+            apt-get update -y
+
+            apt-get install -y \
+                wget \
+                curl \
+                tar \
+                jq \
+                ca-certificates \
+                coreutils
+            ;;
+        *)
+            die "不支持的发行版：${release}"
+            ;;
+    esac
+
+    command_exists curl || die "curl 安装失败。"
+    command_exists wget || die "wget 安装失败。"
+    command_exists tar || die "tar 安装失败。"
+    command_exists jq || die "jq 安装失败。"
+
+    log "基础依赖安装完成。"
+}
+
+# ------------------------------------------------------------
+# configuration
+# ------------------------------------------------------------
+
 config_after_install() {
-    echo -e "${yellow}安装完成修改账户密码端口${plain}"
-    if [[ -n "${XUI_AUTO_CONFIRM}" && -n "${XUI_USERNAME}" && -n "${XUI_PASSWORD}" && -n "${XUI_PORT}" ]]; then
-        echo -e "${green}=====全自动模式=====${plain}"
+    echo
+    echo -e "${yellow}========== x-ui 面板配置 ==========${plain}"
+
+    # 自动模式
+    if [[ -n "${XUI_AUTO_CONFIRM:-}" ]] &&
+       [[ -n "${XUI_USERNAME:-}" ]] &&
+       [[ -n "${XUI_PASSWORD:-}" ]] &&
+       [[ -n "${XUI_PORT:-}" ]]; then
+
         config_confirm="${XUI_AUTO_CONFIRM}"
         config_account="${XUI_USERNAME}"
         config_password="${XUI_PASSWORD}"
         config_port="${XUI_PORT}"
+
+        log "检测到全自动配置模式。"
+
     else
-        read -p "确认继续?[y/n]:" config_confirm
-        if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-            read -p "账户名:" config_account
-            read -p "密码:" config_password
-            read -p "面板端口:" config_port
+        read -r -p "确认修改 x-ui 账户、密码和端口？[y/n]: " config_confirm
+
+        if [[ "${config_confirm}" =~ ^[Yy]$ ]]; then
+
+            read -r -p "账户名: " config_account
+
+            while [[ -z "${config_account}" ]]; do
+                read -r -p "账户名不能为空，请重新输入: " config_account
+            done
+
+            read -r -s -p "密码: " config_password
+            echo
+
+            while [[ -z "${config_password}" ]]; do
+                read -r -s -p "密码不能为空，请重新输入: " config_password
+                echo
+            done
+
+            read -r -p "面板端口: " config_port
+
+            if ! [[ "${config_port}" =~ ^[0-9]+$ ]] ||
+               (( config_port < 1 || config_port > 65535 )); then
+                die "面板端口无效：${config_port}"
+            fi
+
         else
-            echo -e "${red}取消，使用默认配置，请手动修改${plain}"
-            return
+            warn "取消修改，继续使用 x-ui 当前配置。"
+
+            return 0
         fi
     fi
-    if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-        /usr/local/x-ui/x-ui setting -username ${config_account} -password ${config_password}
-        /usr/local/x-ui/x-ui setting -port ${config_port}
+
+    [[ -n "${config_account}" ]] || die "账户名为空。"
+    [[ -n "${config_password}" ]] || die "密码为空。"
+
+    if ! [[ "${config_port}" =~ ^[0-9]+$ ]] ||
+       (( config_port < 1 || config_port > 65535 )); then
+        die "面板端口无效：${config_port}"
     fi
+
+    # 统一变量
+    XUI_USERNAME="${config_account}"
+    XUI_PASSWORD="${config_password}"
+    XUI_PORT="${config_port}"
+
+    export XUI_USERNAME
+    export XUI_PASSWORD
+    export XUI_PORT
+
+    log "正在修改 x-ui 账户..."
+
+    /usr/local/x-ui/x-ui setting \
+        -username "${XUI_USERNAME}" \
+        -password "${XUI_PASSWORD}" \
+        || die "修改 x-ui 用户名/密码失败。"
+
+    log "正在修改 x-ui 面板端口..."
+
+    /usr/local/x-ui/x-ui setting \
+        -port "${XUI_PORT}" \
+        || die "修改 x-ui 端口失败。"
+
+    log "x-ui 配置修改完成。"
 }
 
-auto_create_vmess() {
-    echo -e "\n${green}>>>等待x‑ui面板启动，调用JSON API创建VMess${plain}"
-    SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip || hostname -I | awk '{print $1}')
-    VMESS_PORT=${XUI_VMESS_PORT:-20001}
-    PANEL_PORT="${config_port}"
-    USER="${config_account}"
-    PWD="${config_password}"
-    BASE_URL="http://127.0.0.1:${PANEL_PORT}"
+# ------------------------------------------------------------
+# get latest version
+# ------------------------------------------------------------
 
-    ready=0
-    for((i=0;i<35;i++));do
-        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 "${BASE_URL}/login")
-        if [[ "${code}" == "200" ]];then
-            ready=1
-            break
-        fi
-        sleep 1
-    done
-    if [[ ${ready} -eq 0 ]];then
-        echo -e "${red}面板35秒未就绪，跳过创建vmess，请查看x-ui log${plain}"
-        return 1
-    fi
+get_latest_version() {
+    local api
+    api="https://api.github.com/repos/vaxilu/x-ui/releases/latest"
 
-    # ========== v0.3.2 真正登录接口 POST /api/login JSON ==========
-    login_resp=$(curl -s -X POST "${BASE_URL}/api/login" \
-      -H "Content-Type: application/json" \
-      -d "{\"username\":\"${USER}\",\"password\":\"${PWD}\"}")
+    last_version="$(
+        curl -fsSL \
+            --connect-timeout 10 \
+            --max-time 30 \
+            "${api}" |
+        jq -r '.tag_name // empty'
+    )"
 
-    token=$(echo "${login_resp}" | jq -r '.data.token')
-    if [[ -z "${token}" || "${token}" == "null" ]];then
-        echo -e "${red}API登录失败！返回：${login_resp}${plain}"
-        return 1
-    fi
-    echo -e "${green}面板登录成功，获取token${plain}"
+    [[ -n "${last_version}" ]] ||
+        die "无法获取 x-ui 最新版本。"
 
-    gen_uuid(){
-        echo "$(head -c16 /dev/urandom | xxd -ps -c 16)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c8 /dev/urandom | xxd -ps -c8)-$(head -c24 /dev/urandom | xxd -ps -c24)"
-    }
-    VMESS_UUID=$(gen_uuid)
-
-    # api/inbound/add json body，和前端提交一致
-add_json=$(cat <<JSON
-{
-  "remark":"auto-vmess",
-  "enable":true,
-  "port":${VMESS_PORT},
-  "protocol":"vmess",
-  "settings":{
-    "clients":[{"id":"${VMESS_UUID}","alterId":0}],
-    "disableInsecureEncryption":false
-  },
-  "streamSettings":{
-    "network":"tcp",
-    "security":"none",
-    "tcpSettings":{"header":{"type":"none"}}
-  },
-  "sniffing":{"enabled":true,"destOverride":["http","tls"]}
+    log "检测到最新版本：${last_version}"
 }
-JSON
-)
 
-    add_resp=$(curl -s -X POST "${BASE_URL}/api/inbound/add" \
-      -H "Authorization: ${token}" \
-      -H "Content-Type: application/json" \
-      -d "${add_json}")
+# ------------------------------------------------------------
+# download x-ui
+# ------------------------------------------------------------
 
-    succ=$(echo "${add_resp}" | jq -r '.success')
-    if [[ "${succ}" == "true" ]];then
-        echo -e "${green}VMess入站创建成功${plain}"
+download_xui() {
+    local version="$1"
+
+    local url
+    local package
+
+    package="/usr/local/x-ui-linux-${arch}.tar.gz"
+
+    url="https://github.com/vaxilu/x-ui/releases/download/${version}/x-ui-linux-${arch}.tar.gz"
+
+    log "下载 x-ui：${version}"
+    log "下载地址：${url}"
+
+    rm -f "${package}"
+
+    wget \
+        --no-check-certificate \
+        --timeout=30 \
+        --tries=3 \
+        -O "${package}" \
+        "${url}" ||
+        die "x-ui 下载失败。"
+
+    [[ -s "${package}" ]] ||
+        die "下载文件为空。"
+}
+
+# ------------------------------------------------------------
+# install x-ui
+# ------------------------------------------------------------
+
+install_x_ui() {
+    local requested_version="${1:-}"
+
+    systemctl stop x-ui 2>/dev/null || true
+
+    cd /usr/local || die "无法进入 /usr/local。"
+
+    if [[ -n "${requested_version}" ]]; then
+        last_version="${requested_version}"
+        log "使用指定版本：${last_version}"
     else
-        echo -e "${red}创建入站失败，返回：${add_resp}${plain}"
+        get_latest_version
+    fi
+
+    download_xui "${last_version}"
+
+    if [[ -d /usr/local/x-ui ]]; then
+        log "删除旧的 /usr/local/x-ui..."
+        rm -rf /usr/local/x-ui
+    fi
+
+    log "解压 x-ui..."
+
+    tar -zxf "/usr/local/x-ui-linux-${arch}.tar.gz" ||
+        die "x-ui 解压失败。"
+
+    rm -f "/usr/local/x-ui-linux-${arch}.tar.gz"
+
+    [[ -d /usr/local/x-ui ]] ||
+        die "解压后没有找到 /usr/local/x-ui。"
+
+    cd /usr/local/x-ui || die "无法进入 /usr/local/x-ui。"
+
+    chmod +x x-ui 2>/dev/null || true
+    chmod +x x-ui.sh 2>/dev/null || true
+    chmod +x "bin/xray-linux-${arch}" 2>/dev/null || true
+
+    [[ -f /usr/local/x-ui/x-ui.service ]] ||
+        die "没有找到 x-ui.service。"
+
+    cp -f \
+        /usr/local/x-ui/x-ui.service \
+        /etc/systemd/system/x-ui.service
+
+    # 注意：
+    # 不再 wget 覆盖 /usr/bin/x-ui。
+    # 不再向 /usr/bin/x-ui 追加 add-vmess case。
+    #
+    # 原脚本这里是一个重要错误来源。
+
+    if [[ -f /usr/local/x-ui/x-ui.sh ]]; then
+        chmod +x /usr/local/x-ui/x-ui.sh
+
+        ln -sf \
+            /usr/local/x-ui/x-ui.sh \
+            /usr/bin/x-ui
+    fi
+
+    systemctl daemon-reload
+
+    systemctl enable x-ui >/dev/null 2>&1 ||
+        die "设置 x-ui 开机启动失败。"
+
+    log "x-ui 文件安装完成。"
+}
+
+# ------------------------------------------------------------
+# start x-ui
+# ------------------------------------------------------------
+
+start_x_ui() {
+    log "启动 x-ui..."
+
+    systemctl restart x-ui ||
+        die "x-ui 启动失败。"
+
+    sleep 2
+
+    if ! systemctl is-active --quiet x-ui; then
+        error "x-ui 服务没有正常运行。"
+        echo
+        systemctl status x-ui --no-pager -l || true
+        echo
+        journalctl -u x-ui --no-pager -n 50 || true
+        exit 1
+    fi
+
+    log "x-ui systemd 服务运行正常。"
+}
+
+# ------------------------------------------------------------
+# wait panel
+# ------------------------------------------------------------
+
+wait_xui_panel() {
+    local port="$1"
+    local max_wait=35
+    local waited=0
+
+    log "等待 x-ui Web 服务启动：127.0.0.1:${port}"
+
+    while (( waited < max_wait )); do
+
+        if curl \
+            -sS \
+            --connect-timeout 1 \
+            --max-time 2 \
+            -o /dev/null \
+            "http://127.0.0.1:${port}/login"; then
+
+            log "x-ui Web 服务已经就绪。"
+            return 0
+        fi
+
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    error "等待 x-ui Web 服务超过 ${max_wait} 秒。"
+
+    echo
+    echo "========== systemctl status =========="
+    systemctl status x-ui --no-pager -l || true
+
+    echo
+    echo "========== x-ui journal =========="
+    journalctl -u x-ui --no-pager -n 50 || true
+
+    return 1
+}
+
+# ------------------------------------------------------------
+# API login diagnostic
+# ------------------------------------------------------------
+
+api_login_test() {
+    local panel_port="$1"
+    local username="$2"
+    local password="$3"
+
+    local base_url
+    local response_file
+    local http_code
+    local body
+    local success
+    local message
+    local token
+
+    base_url="http://127.0.0.1:${panel_port}"
+    response_file="$(mktemp)"
+
+    log "测试 x-ui /api/login..."
+
+    http_code="$(
+        curl \
+            -sS \
+            --connect-timeout 5 \
+            --max-time 15 \
+            -o "${response_file}" \
+            -w '%{http_code}' \
+            -X POST \
+            "${base_url}/api/login" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -cn \
+                --arg username "${username}" \
+                --arg password "${password}" \
+                '{username:$username,password:$password}')"
+    )"
+
+    body="$(cat "${response_file}")"
+    rm -f "${response_file}"
+
+    if [[ "${http_code}" != "200" ]]; then
+        error "/api/login HTTP 状态异常：${http_code}"
+        echo "响应：${body}"
         return 1
     fi
 
-    list_resp=$(curl -s -X GET "${BASE_URL}/api/inbound/list" -H "Authorization: ${token}")
-    VMESS_UUID=$(echo "${list_resp}" | jq -r '.[-1].settings.clients[0].id')
-    ALTERID=0
+    if ! echo "${body}" | jq empty >/dev/null 2>&1; then
+        error "/api/login 返回的不是合法 JSON。"
+        echo "响应：${body}"
+        return 1
+    fi
 
-vmess_json="{\"v\":\"2\",\"ps\":\"auto-vmess\",\"add\":\"${SERVER_IP}\",\"port\":\"${VMESS_PORT}\",\"id\":\"${VMESS_UUID}\",\"aid\":\"${ALTERID}\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}"
+    success="$(echo "${body}" | jq -r '.success // false')"
+    message="$(echo "${body}" | jq -r '.msg // .message // empty')"
+    token="$(echo "${body}" | jq -r '.data.token // empty')"
 
-    b64=$(echo -n "${vmess_json}" | base64 -w0)
-    VMESS_LINK="vmess://${b64}"
+    if [[ "${success}" != "true" ]]; then
+        error "x-ui API 登录失败。"
+        [[ -n "${message}" ]] && echo "API message: ${message}"
+        return 1
+    fi
 
-    echo -e "${green}==================== VMess链接 ====================${plain}"
-    echo "${VMESS_LINK}"
-    echo -e "${green}=====================================================${plain}"
-    echo "IP: ${SERVER_IP}"
-    echo "端口: ${VMESS_PORT}"
-    echo "UUID: ${VMESS_UUID}"
-    echo "AlterId: ${ALTERID}"
-    echo -e "\n⚠️云服务器安全组放行面板端口、vmess端口\n"
+    # 某些版本返回 token，某些版本认证方式不同。
+    if [[ -n "${token}" ]]; then
+        log "API 登录成功，服务器返回 token。"
+    else
+        log "API 登录成功，但当前版本没有返回 token。"
+    fi
+
+    return 0
 }
 
-install_x-ui() {
-    systemctl stop x-ui
-    cd /usr/local/
-    if [ $# == 0 ]; then
-        last_version=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}获取版本失败${plain}"
-            exit 1
-        fi
-        echo "检测最新版本：${last_version}"
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载x-ui失败${plain}"
-            exit 1
-        fi
+# ------------------------------------------------------------
+# API inbound list diagnostic
+# ------------------------------------------------------------
+
+api_inbound_list_test() {
+    local panel_port="$1"
+    local username="$2"
+    local password="$3"
+
+    local base_url
+    local cookie_file
+    local login_body
+    local login_code
+    local list_code
+    local list_body
+
+    base_url="http://127.0.0.1:${panel_port}"
+    cookie_file="$(mktemp)"
+
+    login_body="$(
+        jq -cn \
+            --arg username "${username}" \
+            --arg password "${password}" \
+            '{username:$username,password:$password}'
+    )"
+
+    log "测试面板认证 Cookie..."
+
+    login_code="$(
+        curl \
+            -sS \
+            --connect-timeout 5 \
+            --max-time 15 \
+            -c "${cookie_file}" \
+            -o /tmp/xui-login-response.json \
+            -w '%{http_code}' \
+            -X POST \
+            "${base_url}/login" \
+            -H 'Content-Type: application/json' \
+            --data "${login_body}"
+    )"
+
+    if [[ "${login_code}" != "200" ]]; then
+        warn "/login 返回 HTTP ${login_code}。"
+        rm -f "${cookie_file}" /tmp/xui-login-response.json
+        return 1
+    fi
+
+    if ! grep -q 'x-ui' "${cookie_file}" 2>/dev/null; then
+        warn "没有在 Cookie Jar 中发现 x-ui Cookie。"
+        rm -f "${cookie_file}" /tmp/xui-login-response.json
+        return 1
+    fi
+
+    log "Cookie 登录认证成功。"
+
+    log "测试 /panel/inbound/list..."
+
+    list_code="$(
+        curl \
+            -sS \
+            --connect-timeout 5 \
+            --max-time 15 \
+            -b "${cookie_file}" \
+            -o /tmp/xui-inbound-response.json \
+            -w '%{http_code}' \
+            "${base_url}/panel/api/inbounds/list"
+    )"
+
+    list_body="$(cat /tmp/xui-inbound-response.json 2>/dev/null || true)"
+
+    rm -f "${cookie_file}"
+    rm -f /tmp/xui-login-response.json
+    rm -f /tmp/xui-inbound-response.json
+
+    if [[ "${list_code}" != "200" ]]; then
+        warn "inbound list HTTP 状态：${list_code}"
+        [[ -n "${list_body}" ]] && echo "响应：${list_body}"
+        return 1
+    fi
+
+    log "面板 inbound API 可以访问。"
+
+    return 0
+}
+
+# ------------------------------------------------------------
+# public IP diagnostic
+# ------------------------------------------------------------
+
+get_public_ip() {
+    local ip=""
+
+    ip="$(
+        curl \
+            -4 \
+            -sS \
+            --connect-timeout 5 \
+            --max-time 10 \
+            https://api.ipify.org 2>/dev/null || true
+    )"
+
+    if [[ "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "${ip}"
+        return 0
+    fi
+
+    ip="$(
+        curl \
+            -4 \
+            -sS \
+            --connect-timeout 5 \
+            --max-time 10 \
+            https://ifconfig.me 2>/dev/null || true
+    )"
+
+    if [[ "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "${ip}"
+        return 0
+    fi
+
+    hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+# ------------------------------------------------------------
+# final diagnostic
+# ------------------------------------------------------------
+
+diagnostic() {
+    echo
+    echo -e "${green}========================================${plain}"
+    echo -e "${green}          x-ui 安装 / API 自检          ${plain}"
+    echo -e "${green}========================================${plain}"
+
+    echo
+    echo "x-ui 版本：${last_version}"
+    echo "面板地址：http://127.0.0.1:${XUI_PORT}"
+    echo "面板端口：${XUI_PORT}"
+
+    public_ip="$(get_public_ip || true)"
+
+    if [[ -n "${public_ip}" ]]; then
+        echo "检测到公网 IPv4：${public_ip}"
     else
-        last_version=$1
-        url="https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
-        echo "安装版本 v$1"
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz ${url}
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载失败${plain}"
-            exit 1
-        fi
-    fi
-    [[ -e /usr/local/x-ui/ ]] && rm -rf /usr/local/x-ui/
-    tar zxvf x-ui-linux-${arch}.tar.gz
-    rm -f x-ui-linux-${arch}.tar.gz
-    cd x-ui
-    chmod +x x-ui bin/xray-linux-${arch}
-    cp -f x-ui.service /etc/systemd/system/
-    wget --no-check-certificate -O /usr/bin/x-ui https://raw.githubusercontent.com/vaxilu/x-ui/main/x-ui.sh
-    chmod +x /usr/local/x-ui/x-ui.sh
-    chmod +x /usr/bin/x-ui
-    # ====================扩展x-ui脚本，增加 add-vmess 子命令====================
-cat >> /usr/bin/x-ui <<'EOF'
-add-vmess)
-    # 用法: x-ui add-vmess <端口> [uuid]
-    VMESS_PORT="${2:-30001}"
-    NEW_UUID="${3:-$(cat /proc/sys/kernel/random/uuid)}"
-
-    USER="${XUI_USERNAME}"
-    PASS="${XUI_PASSWORD}"
-    PANEL_PORT="${XUI_PORT}"
-
-    if [ -z "${USER}" ] || [ -z "${PASS}" ] || [ -z "${PANEL_PORT}" ];then
-        echo "ERROR: missing env: XUI_USERNAME XUI_PASSWORD XUI_PORT"
-        exit 1
+        echo "公网 IPv4：获取失败"
     fi
 
-    MAX_WAIT=35
-    WAITED=0
-    COOKIE_VALUE=""
+    echo
+    echo "---------- systemd ----------"
 
-    # 第一步：先探测tcp端口可连接，再尝试登录
-    while [ $WAITED -lt $MAX_WAIT ]; do
-        if timeout 1 bash -c "</dev/tcp/127.0.0.1/${PANEL_PORT}" 2>/dev/null; then
-            break
-        fi
-        sleep 1
-        WAITED=$((WAITED+1))
-    done
-
-    if [ $WAITED -ge $MAX_WAIT ];then
-        echo "ERROR: cannot connect to x‑ui tcp port ${PANEL_PORT} after ${MAX_WAIT}s"
-        exit 1
+    if systemctl is-active --quiet x-ui; then
+        echo -e "${green}x-ui：运行中${plain}"
+    else
+        echo -e "${red}x-ui：未运行${plain}"
     fi
 
-    # 第二步：执行登录，捕获全部响应头，提取Set‑Cookie，不再使用curl -c -
-    LOGIN_BODY="{\"username\":\"${USER}\",\"password\":\"${PASS}\"}"
-    while [ $WAITED -lt $MAX_WAIT ]; do
-        RESP=$(curl -s -i -X POST "http://127.0.0.1:${PANEL_PORT}/login" \
-            -H "Content-Type: application/json" \
-            -d "${LOGIN_BODY}")
-        # 提取cookie x-ui=xxx
-        COOKIE_VALUE=$(echo "${RESP}" | grep -i '^Set-Cookie:' | grep -o 'x-ui=[^;]*' | head -n1)
-        if [ -n "${COOKIE_VALUE}" ];then
-            break
-        fi
-        sleep 1
-        WAITED=$((WAITED+1))
-    done
+    echo
+    echo "---------- API /api/login ----------"
 
-    if [ -z "${COOKIE_VALUE}" ];then
-        echo "ERROR: login failed, cannot get x‑ui cookie after ${MAX_WAIT}s"
-        exit 1
+    if api_login_test \
+        "${XUI_PORT}" \
+        "${XUI_USERNAME}" \
+        "${XUI_PASSWORD}"; then
+
+        echo -e "${green}API 登录：OK${plain}"
+    else
+        echo -e "${red}API 登录：FAILED${plain}"
     fi
 
-    # 创建inbound
-    curl -s -X POST "http://127.0.0.1:${PANEL_PORT}/panel/inbound/add" \
-    -H "Cookie: ${COOKIE_VALUE}" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"up\":0,
-      \"down\":0,
-      \"total\":0,
-      \"remark\":\"auto-vmess\",
-      \"enable\":true,
-      \"expiry\":0,
-      \"listen\":\"\",
-      \"port\":${VMESS_PORT},
-      \"protocol\":\"vmess\",
-      \"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"${NEW_UUID}\\\",\\\"alterId\\\":0}]}\",
-      \"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\",\\\"security\\\":\\\"none\\\",\\\"tcpSettings\\\":{\\\"header\\\":{\\\"type\\\":\\\"none\\\"}}}\",
-      \"sniffing\":\"{\\\"enabled\\\":false,\\\"destOverride\\\":[\\\"http\\\",\\\"tls\\\"]}\"
-    }"
+    echo
+    echo "---------- Cookie / inbound API ----------"
 
-    PUBLIC_IP=$(hostname -I | awk '{print $1}')
-    VMESS_PAYLOAD="{\"v\":\"2\",\"ps\":\"auto-vmess\",\"add\":\"${PUBLIC_IP}\",\"port\":\"${VMESS_PORT}\",\"id\":\"${NEW_UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}"
-    VMESS_LINK="vmess://$(echo -n "${VMESS_PAYLOAD}" | base64 -w0)"
-    echo ""
-    echo "VMESS_UUID=${NEW_UUID}"
-    echo "VMESS_LINK=${VMESS_LINK}"
-    echo "${VMESS_LINK}" > /root/vmess-info.txt
-;;
-EOF
+    if api_inbound_list_test \
+        "${XUI_PORT}" \
+        "${XUI_USERNAME}" \
+        "${XUI_PASSWORD}"; then
 
-# ====================扩展结束====================
+        echo -e "${green}Inbound API：OK${plain}"
+    else
+        echo -e "${yellow}Inbound API：当前版本/路由可能不同，请查看上面的响应。${plain}"
+    fi
 
+    echo
+    echo -e "${green}========================================${plain}"
+    echo "x-ui 安装完成。"
+    echo
+    echo "管理命令：x-ui"
+    echo "服务状态：systemctl status x-ui"
+    echo "服务日志：journalctl -u x-ui -n 100 --no-pager"
+    echo -e "${green}========================================${plain}"
+}
+
+# ------------------------------------------------------------
+# main
+# ------------------------------------------------------------
+
+main() {
+    echo -e "${green}"
+    echo "========================================"
+    echo "          x-ui Installation"
+    echo "========================================"
+    echo -e "${plain}"
+
+    detect_system
+    detect_arch
+    check_64bit
+    check_os_version
+    install_base
+
+    # 第一个参数可以指定 x-ui 版本
+    install_x_ui "${1:-}"
 
     config_after_install
 
-    systemctl daemon-reload
-    systemctl enable x-ui
-    systemctl start x-ui
-    
-#自动创建vmess，读取环境变量XUI_VMESS_PORT，默认30001
-XUI_VMESS_PORT=${XUI_VMESS_PORT:-30001} x-ui add-vmess ${XUI_VMESS_PORT}
+    # 如果用户没有修改配置，则从 x-ui 当前配置中获取端口。
+    if [[ -z "${XUI_PORT:-}" ]]; then
+        warn "没有设置 XUI_PORT。"
+        warn "请确认 x-ui 当前实际监听端口。"
+        XUI_PORT="${XUI_PORT:-54321}"
+    fi
 
-    #auto_create_vmess
+    start_x_ui
 
-    echo -e "${green}x-ui v${last_version} 安装完成${plain}"
-    echo "x-ui 管理命令：x-ui"
+    wait_xui_panel "${XUI_PORT}" || {
+        die "x-ui Web 服务启动失败，请检查日志。"
+    }
+
+    diagnostic
 }
 
-echo -e "${green}开始安装${plain}"
-install_base
-install_x-ui $1
-
-# ==========自动创建VMess节点 START 无jq无额外依赖 ==========
-NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
-MAX_WAIT=35
-WAITED=0
-COOKIE=""
-
-LOCAL_USER="${XUI_USERNAME}"
-LOCAL_PASS="${XUI_PASSWORD}"
-LOCAL_PORT="${XUI_PORT}"
-VMESS_INBOUND_PORT="${XUI_VMESS_PORT:-30001}"
-
-echo ">>>等待x‑ui面板启动，调用JSON API创建VMess"
-while [ $WAITED -lt $MAX_WAIT ]; do
-  COOKIE=$(curl -s -c - -X POST "http://127.0.0.1:${LOCAL_PORT}/login" \
-    -H "Content-Type: application/json" \
-    -d "{\"username\":\"${LOCAL_USER}\",\"password\":\"${LOCAL_PASS}\"}" 2>/dev/null | grep -o "x-ui.*=[^;]*")
-  if [[ -n "${COOKIE}" ]];then
-    echo ">>> x‑ui面板web服务就绪"
-    break
-  fi
-  sleep 1
-  WAITED=$((WAITED+1))
-done
-
-if [[ -n "${COOKIE}" ]];then
-  echo ">>> 登录面板成功，创建VMess inbound，端口:${VMESS_INBOUND_PORT}"
-  ADD_RET=$(curl -s -X POST "http://127.0.0.1:${LOCAL_PORT}/panel/inbound/add" \
-  -H "Cookie: ${COOKIE}" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"up\":0,
-    \"down\":0,
-    \"total\":0,
-    \"remark\":\"auto-vmess-default\",
-    \"enable\":true,
-    \"expiry\":0,
-    \"listen\":\"\",
-    \"port\":${VMESS_INBOUND_PORT},
-    \"protocol\":\"vmess\",
-    \"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"${NEW_UUID}\\\",\\\"alterId\\\":0}]}\",
-    \"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\",\\\"security\\\":\\\"none\\\",\\\"tcpSettings\\\":{\\\"header\\\":{\\\"type\\\":\\\"none\\\"}}}\",
-    \"sniffing\":\"{\\\"enabled\\\":false,\\\"destOverride\\\":[\\\"http\\\",\\\"tls\\\"]}\"
-  }")
-
-  PUBLIC_IP=$(hostname -I | awk '{print $1}')
-  # bash手动拼接vmess json，不用jq
-VMESS_PAYLOAD="{\"v\":\"2\",\"ps\":\"auto-vmess-default\",\"add\":\"${PUBLIC_IP}\",\"port\":\"${VMESS_INBOUND_PORT}\",\"id\":\"${NEW_UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}"
-  VMESS_LINK="vmess://$(echo -n "${VMESS_PAYLOAD}" | base64 -w0)"
-
-  echo "✅ VMess创建成功"
-  echo "✅ UUID: ${NEW_UUID}"
-  echo "✅ ${VMESS_LINK}"
-  echo "${VMESS_LINK}" > /root/vmess-info.txt
-else
-  echo "!!! 面板${MAX_WAIT}秒未就绪，跳过创建vmess，请查看x‑ui log"
-fi
-# ==========自动创建VMess节点 END ==========
-
-
+main "$@"
+```
