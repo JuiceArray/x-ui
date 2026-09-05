@@ -46,7 +46,6 @@ if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
 fi
 
 os_version=""
-# os version
 if [[ -f /etc/os-release ]]; then
     os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
 fi
@@ -70,13 +69,13 @@ fi
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar jq -y
+        yum install wget curl tar -y
     else
-        apt install wget curl tar jq -y
+        apt install wget curl tar -y
     fi
 }
 
-# 自动获取公网IP
+#获取公网IP
 get_public_ip(){
     pub_ip=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip || curl -s --max-time 5 icanhazip.com)
     if [[ -z "${pub_ip}" ]]; then
@@ -86,14 +85,13 @@ get_public_ip(){
 }
 
 config_after_install() {
-    # 环境变量自动模式：直接赋值，不输出安全提示、不交互
+    #环境变量自动模式，完全无交互，不输出安全提示
     if [[ x"${XUI_AUTO_CONFIRM}" == x"y" || x"${XUI_AUTO_CONFIRM}" == x"Y" ]]; then
         config_confirm="y"
         config_account="${XUI_USERNAME:-admin}"
         config_password="${XUI_PASSWORD:-admin}"
         config_port="${XUI_PORT:-54321}"
     else
-        # 普通交互模式才输出提示
         echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改端口与账户密码${plain}"
         read -p "确认是否继续?[y/n]:" config_confirm
         if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
@@ -128,7 +126,6 @@ pub_ip=$(get_public_ip)
 now_time=$(date +"%Y%m%d_%H%M%S")
 remark_name="${pub_ip}_${now_time}"
 
-# 获取cookie
 echo -e "\n===== 登录请求 ====="
 COOKIE_RAW=$(curl -i -s \
 -X POST \
@@ -170,27 +167,8 @@ rm -f "$RESPONSE_FILE"
 echo "HTTP状态码: $HTTP_CODE"
 echo "返回结果: $RESPONSE_BODY"
 
-# 兼容：有jq就用jq，没有就shell拼接，防止缺失依赖空链接
-if command -v jq >/dev/null 2>&1; then
-    vmess_json=$(jq -n \
-    --arg v "2" \
-    --arg ps "${remark_name}" \
-    --arg add "${pub_ip}" \
-    --arg port "${VMESS_PORT}" \
-    --arg id "${UUID}" \
-    --arg aid "0" \
-    --arg scy "auto" \
-    --arg net "tcp" \
-    --arg type "none" \
-    --arg host "" \
-    --arg path "" \
-    '{v:$v,ps:$ps,add:$add,port:$port,id:$id,aid:$aid,scy:$scy,net:$net,type:$type,host:$host,path:$path}')
-else
-    echo -e "${yellow}警告：未检测到jq，使用shell原生拼接JSON${plain}"
-    vmess_json="{\"v\":\"2\",\"ps\":\"${remark_name}\",\"add\":\"${pub_ip}\",\"port\":\"${VMESS_PORT}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\"}"
-fi
-
-# base64编码，-w0关闭换行
+#纯shell拼接vmess json，无jq依赖
+vmess_json="{\"v\":\"2\",\"ps\":\"${remark_name}\",\"add\":\"${pub_ip}\",\"port\":\"${VMESS_PORT}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\"}"
 b64_str=$(echo -n "${vmess_json}" | base64 -w0)
 vmess_link="vmess://${b64_str}"
 
