@@ -190,10 +190,10 @@ vmess_link="vmess://${b64_str}"
 
 echo ""
 echo -e "${cyan}==================== VMESS节点信息 ====================${plain}"
-echo "备注名称: ${green}${remark_name}"
-echo "端口: ${green}${VMESS_PORT}"
+echo "备注名称: ${green}${remark_name}${plain}"
+echo "端口: ${green}${VMESS_PORT}${plain}"
 echo "UUID: ${UUID}"
-echo "VMess链接: ${yellow}${vmess_link}"
+echo "VMess链接: ${yellow}${vmess_link}${plain}"
 echo -e "${cyan}=======================================================${plain}"
 echo ""
 }
