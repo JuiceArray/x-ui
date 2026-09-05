@@ -94,9 +94,9 @@ gen_rand_password(){
     echo
 }
 
-#生成随机端口 >1024，区间20000‑60000
+#生成随机端口 >1024，区间20000‑50000
 gen_rand_port(){
-    shuf -i 20000-60000 -n1
+    shuf -i 20000-50000 -n1
 }
 
 config_after_install() {
