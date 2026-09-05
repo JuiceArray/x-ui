@@ -226,14 +226,81 @@ install_x-ui() {
     wget --no-check-certificate -O /usr/bin/x-ui https://raw.githubusercontent.com/vaxilu/x-ui/main/x-ui.sh
     chmod +x /usr/local/x-ui/x-ui.sh
     chmod +x /usr/bin/x-ui
+    # ====================扩展x-ui脚本，增加 add-vmess 子命令====================
+cat >> /usr/bin/x-ui <<'EOF'
+add-vmess)
+    # 用法: x-ui add-vmess <端口> [uuid]
+    VMESS_PORT="${2:-30001}"
+    NEW_UUID="${3:-$(cat /proc/sys/kernel/random/uuid)}"
+
+    USER="${XUI_USERNAME}"
+    PASS="${XUI_PASSWORD}"
+    PANEL_PORT="${XUI_PORT}"
+
+    if [ -z "${USER}" ] || [ -z "${PASS}" ] || [ -z "${PANEL_PORT}" ];then
+        echo "ERROR: missing env: XUI_USERNAME XUI_PASSWORD XUI_PORT"
+        exit 1
+    fi
+
+    MAX_WAIT=35
+    WAITED=0
+    COOKIE=""
+    while [ $WAITED -lt $MAX_WAIT ]; do
+      COOKIE=$(curl -s -c - -X POST "http://127.0.0.1:${PANEL_PORT}/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"${USER}\",\"password\":\"${PASS}\"}" 2>/dev/null | grep -o "x-ui.*=[^;]*")
+      if [[ -n "${COOKIE}" ]];then
+          break
+      fi
+      sleep 1
+      WAITED=$((WAITED+1))
+    done
+
+    if [[ -z "${COOKIE}" ]];then
+        echo "ERROR: x‑ui panel web not ready after ${MAX_WAIT}s"
+        exit 1
+    fi
+
+    curl -s -X POST "http://127.0.0.1:${PANEL_PORT}/panel/inbound/add" \
+    -H "Cookie: ${COOKIE}" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"up\":0,
+      \"down\":0,
+      \"total\":0,
+      \"remark\":\"auto-vmess\",
+      \"enable\":true,
+      \"expiry\":0,
+      \"listen\":\"\",
+      \"port\":${VMESS_PORT},
+      \"protocol\":\"vmess\",
+      \"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"${NEW_UUID}\\\",\\\"alterId\\\":0}]}\",
+      \"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\",\\\"security\\\":\\\"none\\\",\\\"tcpSettings\\\":{\\\"header\\\":{\\\"type\\\":\\\"none\\\"}}}\",
+      \"sniffing\":\"{\\\"enabled\\\":false,\\\"destOverride\\\":[\\\"http\\\",\\\"tls\\\"]}\"
+    }"
+
+    PUBLIC_IP=$(hostname -I | awk '{print $1}')
+    VMESS_PAYLOAD="{\"v\":\"2\",\"ps\":\"auto-vmess\",\"add\":\"${PUBLIC_IP}\",\"port\":\"${VMESS_PORT}\",\"id\":\"${NEW_UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}"
+    VMESS_LINK="vmess://$(echo -n "${VMESS_PAYLOAD}" | base64 -w0)"
+    echo ""
+    echo "VMESS_UUID=${NEW_UUID}"
+    echo "VMESS_LINK=${VMESS_LINK}"
+    echo "${VMESS_LINK}" > /root/vmess-info.txt
+;;
+EOF
+# ====================扩展结束====================
+
 
     config_after_install
 
     systemctl daemon-reload
     systemctl enable x-ui
     systemctl start x-ui
+    
+#自动创建vmess，读取环境变量XUI_VMESS_PORT，默认30001
+XUI_VMESS_PORT=${XUI_VMESS_PORT:-30001} x-ui add-vmess ${XUI_VMESS_PORT}
 
-    auto_create_vmess
+    #auto_create_vmess
 
     echo -e "${green}x-ui v${last_version} 安装完成${plain}"
     echo "x-ui 管理命令：x-ui"
