@@ -257,8 +257,8 @@ install_x-ui() {
     echo -e "x-ui uninstall    - 卸载 x-ui 面板"
     echo -e "----------------------------------------------"
 
-    echo -e "\n${yellow}等待面板服务就绪 5秒...${plain}"
-    sleep 5
+    echo -e "\n${yellow}等待面板服务就绪 3秒...${plain}"
+    sleep 3
     create_vmess
 }
 
