@@ -242,3 +242,43 @@ install_x-ui() {
 echo -e "${green}开始安装${plain}"
 install_base
 install_x-ui $1
+
+# ========== 自动创建VMess节点 START ==========
+sleep 10
+# 加载面板自动生成配置
+source /etc/x-ui/x-ui.conf
+
+NEW_UUID=$(cat /proc/sys/kernel/random/uuid)
+
+# 获取登录Cookie
+COOKIE=$(curl -s -c - -X POST "http://127.0.0.1:${XUI_PORT}/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${XUI_USER}\",\"password\":\"${XUI_PASS}\"}" 2>/dev/null | grep -o "x-ui.*=[^;]*")
+
+if [[ -n "${COOKIE}" ]];then
+  echo ">>> 登录面板成功，正在自动创建VMess节点"
+  # API新增inbound
+  ADD_RET=$(curl -s -X POST "http://127.0.0.1:${XUI_PORT}/panel/inbound/add" \
+  -H "Cookie: ${COOKIE}" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"up\":0,
+    \"down\":0,
+    \"total\":0,
+    \"remark\":\"auto-vmess-default\",
+    \"enable\":true,
+    \"expiry\":0,
+    \"listen\":\"\",
+    \"port\":20001,
+    \"protocol\":\"vmess\",
+    \"settings\":\"{\\\"clients\\\":[{\\\"id\\\":\\\"${NEW_UUID}\\\",\\\"alterId\\\":0}]}\",
+    \"streamSettings\":\"{\\\"network\\\":\\\"tcp\\\",\\\"security\\\":\\\"none\\\",\\\"tcpSettings\\\":{\\\"header\\\":{\\\"type\\\":\\\"none\\\"}}}\",
+    \"sniffing\":\"{\\\"enabled\\\":false,\\\"destOverride\\\":[\\\"http\\\",\\\"tls\\\"]}\"
+  }")
+  echo ">>> VMess节点创建完成，UUID: ${NEW_UUID}"
+  echo ">>> VMess: vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"auto-vmess-default\",\"add\":\"$(hostname -I | awk '{print $1}')\",\"port\":\"20001\",\"id\":\"${NEW_UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}" | base64 -w0)"
+else
+  echo "!!! 面板登录失败，跳过自动创建VMess"
+fi
+# ========== 自动创建VMess节点 END ==========
+
